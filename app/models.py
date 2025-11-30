@@ -1,4 +1,4 @@
-from typing import List, Optional, Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -9,7 +9,7 @@ class SourceMedia(BaseModel):
     video_url: Optional[HttpUrl] = Field(
         None, description="Optional source video to analyze for candidate frames."
     )
-    image_urls: List[HttpUrl] = Field(
+    image_urls: list[HttpUrl] = Field(
         default_factory=list,
         description="Existing frames, screenshots, or inspiration images.",
     )
@@ -40,12 +40,10 @@ class ThumbnailRequest(BaseModel):
     goal: Optional[str] = Field(
         None, description="Primary KPI to optimize for, e.g. CTR or retention."
     )
-    brand_colors: List[str] = Field(
+    brand_colors: list[str] = Field(
         default_factory=list, description="Preferred colors as names or hex codes."
     )
-    notes: Optional[str] = Field(
-        None, description="Any extra creative guidance or constraints."
-    )
+    notes: Optional[str] = Field(None, description="Any extra creative guidance or constraints.")
 
 
 class CompositionLayer(BaseModel):
@@ -53,9 +51,7 @@ class CompositionLayer(BaseModel):
 
     kind: str = Field(..., description="Layer type, e.g. background, subject, title.")
     description: str = Field(..., description="What the layer contributes visually.")
-    asset_url: Optional[HttpUrl] = Field(
-        None, description="Static asset preview if available."
-    )
+    asset_url: Optional[HttpUrl] = Field(None, description="Static asset preview if available.")
 
 
 class ThumbnailResponse(BaseModel):
@@ -67,5 +63,5 @@ class ThumbnailResponse(BaseModel):
     thumbnail_url: HttpUrl
     selected_frame_url: Optional[HttpUrl]
     profile_variant_url: Optional[HttpUrl]
-    layers: List[CompositionLayer]
+    layers: list[CompositionLayer]
     summary: str

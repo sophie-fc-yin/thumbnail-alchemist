@@ -26,6 +26,59 @@ Thumbnail Alchemist uses a structured agent flow:
 
 Each agent collaborates and provides feedback, forming an iterative loop that refines the final output.
 
+## Setup & Installation
+
+### Prerequisites
+
+1. **Install uv** (if not already installed):
+```bash
+brew install uv
+```
+
+### Environment Setup
+
+2. **Create virtual environment and install dependencies**:
+```bash
+# Create virtual environment (creates .venv directory)
+uv venv
+
+# Activate the virtual environment
+source .venv/bin/activate  # On macOS/Linux
+# or
+.venv\Scripts\activate     # On Windows
+
+# Install dependencies from pyproject.toml
+uv sync
+```
+
+Alternatively, you can use `uv` without activating the venv:
+```bash
+# Create and use venv automatically
+uv venv
+uv run uvicorn app.main:app --reload
+```
+
+### Pre-commit Hooks
+
+3. **Set up pre-commit hooks** (optional but recommended):
+```bash
+# Install dev dependencies (includes pre-commit)
+uv sync --extra dev
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run hooks manually on all files (optional)
+pre-commit run --all-files
+```
+
+The pre-commit configuration includes:
+- Code formatting (ruff)
+- Linting (ruff)
+- Import sorting (isort)
+- File checks (trailing whitespace, end of file, YAML/JSON/TOML validation)
+- Security checks (private key detection)
+
 ## API (WIP)
 
 This repo now includes a starter FastAPI service with a static thumbnail generation demo.
@@ -43,5 +96,5 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 9000
 # Or using uv directly (no activation needed)
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 9000
 
-# Then visit http://localhost:8000/docs
+# Then visit http://localhost:9000/docs
 ```

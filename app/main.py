@@ -14,8 +14,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     return ThumbnailResponse(
         request_id=demo_id,
         status="draft",
-        recommended_title=payload.title_hint
-        or "The AI That Designs Thumbnails For You",
+        recommended_title=payload.title_hint or "The AI That Designs Thumbnails For You",
         thumbnail_url="https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f"
         "?auto=format&fit=crop&w=1200&q=80",
         selected_frame_url="https://images.unsplash.com/photo-1521737604893-d14cc237f11d"
