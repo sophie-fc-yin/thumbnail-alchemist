@@ -6,8 +6,14 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi",
+    "pydantic>=2.0.0",
+    "uvicorn[standard]",
     "google-cloud-storage>=3.7.0",
-    "uvicorn",
+    "openai>=1.0.0",
+    "librosa>=0.10.2,<0.11.0",
+    "numpy",
+    "opencv-python>=4.8.0",
+    "mediapipe>=0.10.0",
 ]
 
 [project.optional-dependencies]

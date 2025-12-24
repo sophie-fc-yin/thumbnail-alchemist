@@ -1,53 +1,88 @@
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 class SourceMedia(BaseModel):
     """Video and/or still images provided by the creator."""
 
-    video_url: Optional[HttpUrl] = Field(
-        None, description="Optional source video to analyze for candidate frames."
+    video_path: Optional[str] = Field(
+        None,
+        description="URL or path to source video (https://storage.googleapis.com/... or local path)",
     )
-    image_urls: list[HttpUrl] = Field(
+    image_paths: list[str] = Field(
         default_factory=list,
-        description="Existing frames, screenshots, or inspiration images.",
+        description="URLs or paths to existing frames, screenshots, or inspiration images",
+    )
+
+    @model_validator(mode="after")
+    def ensure_media_present(self) -> "SourceMedia":
+        """Require at least one media source."""
+        if not self.video_path and not self.image_paths:
+            raise ValueError("Provide at least one of video_path or image_paths.")
+        return self
+
+
+class Target(BaseModel):
+    """Target platform and optimization settings."""
+
+    platform: str = Field(
+        "youtube",
+        description="Platform/orientation to optimize for (e.g. YouTube, Shorts, Reels, TikTok).",
+    )
+    optimization: Optional[str] = Field(
+        None, description="Primary KPI to optimize for, e.g. CTR or retention."
+    )
+
+
+class CreativeBrief(BaseModel):
+    """Creative direction and brand guidelines for the thumbnail design."""
+
+    mood: Optional[str] = Field(
+        None,
+        description="Desired tone or vibe, e.g. 'dramatic, high-contrast, cinematic'.",
+        max_length=120,
+    )
+    title_hint: Optional[str] = Field(
+        None, description="Optional working title or topic to steer the concept."
+    )
+    brand_colors: list[str] = Field(
+        default_factory=list, description="Preferred colors as names or hex codes."
+    )
+    notes: Optional[str] = Field(
+        None,
+        description="Any extra creative guidance or constraints.",
+        max_length=1000,
     )
 
 
 class ThumbnailRequest(BaseModel):
     """Payload describing the creative intent for a thumbnail."""
 
-    sources: SourceMedia = Field(
+    project_id: Optional[str] = Field(
+        None,
+        description="Optional project identifier. If not provided, a new UUID will be generated. Use the same project_id to overwrite previous frames.",
+    )
+    content_sources: SourceMedia = Field(
         ...,
-        description="Media to source the thumbnail components (backgrounds, frames, inspiration).",
+        description="Video and images from the actual content being thumbnailed - provides context for background, composition, and theme.",
     )
-    profile_photo_url: Optional[HttpUrl] = Field(
-        None,
-        description="Creator photo (face, upper body, or full body) to blend into the design.",
+    profile_photos: list[str] = Field(
+        default_factory=list,
+        description="URLs or paths to creator photos (https://storage.googleapis.com/... or local paths) to create the user avatar for the thumbnail design.",
     )
-    target_platform: str = Field(
-        "youtube",
-        description="Platform/orientation to optimize for (e.g. YouTube, Shorts, Reels, TikTok).",
+    target: Target = Field(
+        default_factory=Target,
+        description="Target platform and optimization settings.",
     )
-    mood: Optional[str] = Field(
-        None,
-        description="Desired tone or vibe, e.g. 'dramatic, high-contrast, cinematic'.",
+    creative_brief: CreativeBrief = Field(
+        default_factory=CreativeBrief,
+        description="Creative direction and brand guidelines for the design.",
     )
-    title_hint: Optional[str] = Field(
-        None, description="Optional working title or topic to steer the concept."
-    )
-    goal: Optional[str] = Field(
-        None, description="Primary KPI to optimize for, e.g. CTR or retention."
-    )
-    brand_colors: list[str] = Field(
-        default_factory=list, description="Preferred colors as names or hex codes."
-    )
-    notes: Optional[str] = Field(None, description="Any extra creative guidance or constraints.")
 
 
 class CompositionLayer(BaseModel):
-    """Simplified layer description for the composed thumbnail."""
+    """Layer description for the composed video thumbnail."""
 
     kind: str = Field(..., description="Layer type, e.g. background, subject, title.")
     description: str = Field(..., description="What the layer contributes visually.")
@@ -57,7 +92,7 @@ class CompositionLayer(BaseModel):
 class ThumbnailResponse(BaseModel):
     """Static demo response returned by the generate endpoint."""
 
-    request_id: str
+    project_id: str
     status: Literal["draft", "final"]
     recommended_title: str
     thumbnail_url: HttpUrl

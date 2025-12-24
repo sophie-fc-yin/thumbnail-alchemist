@@ -19,7 +19,7 @@ Blends profile photo, video frame, product images, lighting, color accents, typo
 
 Thumbnail Alchemist uses a structured agent flow:
 	1.	Planner Agent – defines thumbnail concept, mood, and layout
-	2.	Analyzer Agent – extracts meaning from images, video, text, and product context
+	2.	Analyzer Agent – extracts context from images, video, text, and product context
 	3.	Title Alchemist Agent – creates optimized, attention-grabbing titles
 	4.	Snapshot Selector Agent – picks or generates the best video moment
 	5.	Composition Agent – combines all assets into a cohesive final thumbnail
@@ -97,4 +97,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 9000
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 9000
 
 # Then visit http://localhost:9000/docs
+
+# Or use make (uvicorn must be installed)
+make serve
 ```
