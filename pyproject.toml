@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi",
+    "google-cloud-storage>=3.7.0",
     "uvicorn",
 ]
 
@@ -13,6 +14,9 @@ dependencies = [
 dev = [
     "pre-commit",
     "ruff",
+    "pytest",
+    "httpx",
+    "anyio",
 ]
 
 [build-system]

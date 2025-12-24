@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Development
+.git/
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+test_*.py
+
+# Documentation
+*.md
+!README.md
+docs/
+
+# Service account keys (don't include in container!)
+*.json
+!pyproject.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Temp files
+frames_*/
+tmp/
+*.tmp
