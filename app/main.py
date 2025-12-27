@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.audio_media import extract_audio_from_video, transcribe_and_analyze_audio
@@ -25,6 +26,19 @@ from app.vision_media import extract_candidate_frames, validate_and_load_content
 from app.vision_stack import analyze_frame_quality, rank_frames
 
 app = FastAPI(title="Thumbnail Alchemist API", version="0.1.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://clickmoment.vercel.app",  # Your Vercel production domain
+        "http://localhost:3000",  # For local frontend development
+        "http://localhost:8000",  # For local backend development
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Video Upload Configuration
 MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
