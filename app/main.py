@@ -1,13 +1,72 @@
+import re
+from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.models import CompositionLayer, ThumbnailRequest, ThumbnailResponse
+from app.audio_media import extract_audio_from_video, transcribe_and_analyze_audio
+from app.models import (
+    AudioBreakdownRequest,
+    AudioBreakdownResponse,
+    CompositionLayer,
+    FrameScore,
+    SourceMedia,
+    ThumbnailRequest,
+    ThumbnailResponse,
+    VideoUploadError,
+    VideoUploadResponse,
+    VisionBreakdownRequest,
+    VisionBreakdownResponse,
+)
+from app.storage import StorageError, upload_file_to_gcs
 from app.vision_media import extract_candidate_frames, validate_and_load_content
+from app.vision_stack import analyze_frame_quality, rank_frames
 
 app = FastAPI(title="Thumbnail Alchemist API", version="0.1.0")
+
+# Video Upload Configuration
+MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
+ALLOWED_VIDEO_MIMETYPES = {
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-matroska",
+    "video/webm",
+    "video/x-flv",
+}
+
+
+def sanitize_filename(filename: str) -> str:
+    """
+    Sanitize filename for safe storage.
+
+    - Remove directory traversal attempts (../)
+    - Remove special characters except alphanumeric, dots, hyphens, underscores
+    - Preserve file extension
+
+    Args:
+        filename: Original filename
+
+    Returns:
+        Sanitized filename safe for storage
+    """
+    # Remove directory components
+    filename = Path(filename).name
+
+    # Split name and extension
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix.lower()
+
+    # Remove unsafe characters from stem (keep alphanumeric, dash, underscore)
+    safe_stem = re.sub(r"[^a-zA-Z0-9_-]", "_", stem)
+
+    # Limit length to 100 chars
+    safe_stem = safe_stem[:100]
+
+    return f"{safe_stem}{suffix}"
 
 
 @app.get("/")
@@ -24,6 +83,225 @@ async def root():
 async def health_check():
     """Health check endpoint for monitoring."""
     return {"status": "healthy"}
+
+
+@app.post("/audio/breakdown", response_model=AudioBreakdownResponse)
+async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownResponse:
+    """
+    Break down audio from video into components.
+
+    Returns transcript, speaker diarization, prosody features, and timeline.
+    """
+    # Use provided project_id or generate new one
+    project_id = payload.project_id or str(uuid4())
+
+    # Create SourceMedia object for audio processing
+    source_media = SourceMedia(video_path=payload.video_path)
+
+    # Extract audio from video
+    try:
+        audio_path = await extract_audio_from_video(
+            content_sources=source_media,
+            project_id=project_id,
+            max_duration_seconds=payload.max_duration_seconds,
+        )
+    except Exception as e:
+        raise ValueError(f"Failed to extract audio from video: {str(e)}") from e
+
+    if not audio_path:
+        raise ValueError("Failed to extract audio from video: ffmpeg returned no output")
+
+    # Analyze audio with transcription and features
+    analysis = await transcribe_and_analyze_audio(
+        audio_path=audio_path,
+        project_id=project_id,
+        language=payload.language,
+    )
+
+    # Upload audio file and timeline JSON to GCS
+    from pathlib import Path
+
+    from google.cloud import storage
+
+    gcs_audio_url = str(audio_path)  # Default to local path
+    try:
+        client = storage.Client()
+        bucket = client.bucket("clickmoment-prod-assets")
+
+        # Upload audio file
+        local_audio_path = Path(audio_path)
+        blob_path = f"projects/{project_id}/signals/audio/{local_audio_path.name}"
+        blob = bucket.blob(blob_path)
+        blob.upload_from_filename(str(audio_path))
+
+        gcs_audio_url = f"gs://clickmoment-prod-assets/{blob_path}"
+
+        # Delete local audio file after upload
+        local_audio_path.unlink()
+        print(f"Uploaded audio to {gcs_audio_url}")
+
+        # Upload timeline JSON if it exists
+        if "timeline_path" in analysis:
+            print(f"Found timeline_path in analysis: {analysis['timeline_path']}")
+            timeline_path = Path(analysis["timeline_path"])
+            if timeline_path.exists():
+                print(f"Timeline file exists at {timeline_path}, uploading...")
+                json_blob_path = f"projects/{project_id}/signals/audio/{timeline_path.name}"
+                json_blob = bucket.blob(json_blob_path)
+                json_blob.upload_from_filename(str(timeline_path))
+
+                gcs_timeline_url = f"gs://clickmoment-prod-assets/{json_blob_path}"
+                print(f"Successfully uploaded timeline JSON to {gcs_timeline_url}")
+
+                # Delete local JSON file after upload
+                timeline_path.unlink()
+            else:
+                print(f"Timeline file does not exist at {timeline_path}")
+        else:
+            print(f"No timeline_path in analysis. Keys: {list(analysis.keys())}")
+
+    except Exception as e:
+        print(f"Failed to upload audio files to GCS: {e}")
+
+    return AudioBreakdownResponse(
+        project_id=project_id,
+        audio_path=gcs_audio_url,
+        transcript=analysis["transcript"],
+        duration_seconds=analysis["duration_seconds"],
+        speakers=analysis["speakers"],
+        speech_tone=analysis["speech_tone"],
+        music_tone=analysis["music_tone"],
+        timeline=analysis["timeline"],
+    )
+
+
+@app.post("/vision/breakdown", response_model=VisionBreakdownResponse)
+async def breakdown_vision(payload: VisionBreakdownRequest) -> VisionBreakdownResponse:
+    """
+    Break down video/images into scored frames.
+
+    Returns scored frames with quality metrics and rankings.
+    """
+    # Use provided project_id or generate new one
+    project_id = payload.project_id or str(uuid4())
+
+    # Create SourceMedia object
+    source_media = SourceMedia(video_path=payload.video_path)
+
+    # Get video duration first
+    import asyncio
+    import shutil
+
+    ffprobe_path = shutil.which("ffprobe")
+    if ffprobe_path:
+        from app.vision_media import generate_signed_url
+
+        video_url = generate_signed_url(payload.video_path)
+
+        probe_process = await asyncio.create_subprocess_exec(
+            ffprobe_path,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await probe_process.communicate()
+        try:
+            video_duration = float(stdout.decode().strip())
+        except (ValueError, AttributeError):
+            video_duration = None
+    else:
+        video_duration = None
+
+    # Extract frames from video (keep local for analysis)
+    candidate_frames = await extract_candidate_frames(
+        content_sources=source_media,
+        project_id=project_id,
+        max_frames=payload.max_frames,
+        upload_to_gcs=False,  # Don't upload yet - need local files for analysis
+    )
+
+    if not candidate_frames:
+        raise ValueError("No frames extracted or provided")
+
+    # Calculate timestamp for each frame (evenly distributed across video duration)
+    frame_timestamps = {}
+    if video_duration:
+        for idx, frame_path in enumerate(candidate_frames):
+            timestamp = (
+                (idx / max(1, len(candidate_frames) - 1)) * video_duration
+                if len(candidate_frames) > 1
+                else 0
+            )
+            frame_timestamps[str(frame_path)] = timestamp
+
+    # Analyze frame quality (requires local files)
+    frame_signals = analyze_frame_quality(candidate_frames)
+
+    # Rank frames by quality
+    ranked_frames = rank_frames(frame_signals)
+
+    # Upload frames to GCS after analysis
+    from pathlib import Path
+
+    from google.cloud import storage
+
+    gcs_frame_urls = {}
+    try:
+        client = storage.Client()
+        bucket = client.bucket("clickmoment-prod-assets")
+
+        for signal in ranked_frames:
+            local_path = Path(signal.path)
+            blob_path = f"projects/{project_id}/signals/frames/{local_path.name}"
+            blob = bucket.blob(blob_path)
+            blob.upload_from_filename(str(local_path))
+
+            gcs_url = f"gs://clickmoment-prod-assets/{blob_path}"
+            gcs_frame_urls[str(local_path)] = gcs_url
+
+            # Delete local file after upload
+            local_path.unlink()
+    except Exception as e:
+        print(f"Failed to upload frames to GCS: {e}")
+
+    # Convert to response format
+    scored_frames = [
+        FrameScore(
+            frame_path=gcs_frame_urls.get(str(signal.path), str(signal.path)),
+            timestamp=frame_timestamps.get(str(signal.path)),
+            brightness=signal.brightness,
+            sharpness=signal.sharpness,
+            motion=signal.motion,
+            face_score=signal.face,
+            expression_score=signal.expression,
+            highlight_score=signal.highlight_score,
+            rank=idx + 1,
+        )
+        for idx, signal in enumerate(ranked_frames)
+    ]
+
+    best_frame = scored_frames[0] if scored_frames else None
+
+    # Build summary with safe formatting
+    if best_frame and best_frame.highlight_score is not None:
+        face_score_str = f"{best_frame.face_score:.3f}" if best_frame.face_score else "0.000"
+        summary = f"Analyzed {len(scored_frames)} frames. Best frame has highlight score of {best_frame.highlight_score:.3f} with face detection score of {face_score_str}."
+    else:
+        summary = f"Analyzed {len(scored_frames)} frames."
+
+    return VisionBreakdownResponse(
+        project_id=project_id,
+        total_frames=len(scored_frames),
+        scored_frames=scored_frames,
+        best_frame=best_frame,
+        summary=summary,
+    )
 
 
 @app.post("/thumbnails/generate", response_model=ThumbnailResponse)
@@ -117,6 +395,123 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
             "Static assets are returned for now; a later iteration will run the full "
             "agent pipeline to select frames, pose the subject, and render the final thumbnail."
         ),
+    )
+
+
+@app.post(
+    "/videos/upload",
+    response_model=VideoUploadResponse,
+    responses={
+        400: {"model": VideoUploadError, "description": "Missing user_id"},
+        413: {"model": VideoUploadError, "description": "File too large"},
+        415: {"model": VideoUploadError, "description": "Unsupported media type"},
+        500: {"model": VideoUploadError, "description": "Upload failed"},
+    },
+    tags=["Video Upload"],
+)
+async def upload_video(
+    file: UploadFile = File(..., description="Video file to upload"),
+    user_id: str = Form(..., description="User ID from your application"),
+) -> VideoUploadResponse:
+    """
+    Upload a video file to cloud storage.
+
+    **File Requirements:**
+    - Max size: 500 MB
+    - Allowed formats: mp4, mov, avi, mkv, webm, flv
+
+    **Storage Path:**
+    - Files saved to: `users/{user_id}/videos/{filename}`
+    - Files with same name are overwritten (with warning in response)
+
+    **Example:**
+    ```bash
+    curl -X POST "http://localhost:9000/videos/upload" \\
+      -F "file=@/path/to/1116_1_.mp4" \\
+      -F "user_id=120accfe-aa23-41a3-b04f-36f581714d52"
+    ```
+    """
+    # Validate file extension
+    filename = file.filename or "video.mp4"
+    file_ext = Path(filename).suffix.lower()
+
+    if file_ext not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail={
+                "error": "Unsupported file format",
+                "detail": f"File extension '{file_ext}' not allowed",
+                "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
+                "max_size_mb": 500,
+            },
+        )
+
+    # Validate MIME type (if provided by client)
+    if file.content_type and file.content_type not in ALLOWED_VIDEO_MIMETYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail={
+                "error": "Unsupported media type",
+                "detail": f"Content-Type '{file.content_type}' not allowed",
+                "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
+                "max_size_mb": 500,
+            },
+        )
+
+    # Read file content
+    file_content = await file.read()
+    file_size_bytes = len(file_content)
+
+    # Validate file size
+    if file_size_bytes > MAX_VIDEO_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail={
+                "error": "File too large",
+                "detail": f"File size {file_size_bytes / 1024 / 1024:.1f} MB exceeds limit of 500 MB",
+                "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
+                "max_size_mb": 500,
+            },
+        )
+
+    # Sanitize filename
+    safe_filename = sanitize_filename(filename)
+
+    # Upload to GCS
+    try:
+        gcs_url, was_overwritten = await upload_file_to_gcs(
+            file_content=file_content,
+            filename=safe_filename,
+            user_id=user_id,
+        )
+    except StorageError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Upload failed",
+                "detail": str(e),
+                "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
+                "max_size_mb": 500,
+            },
+        ) from e
+
+    # Build response
+    status_msg = "warning" if was_overwritten else "success"
+    message = (
+        "Video uploaded successfully (overwrote existing file)"
+        if was_overwritten
+        else "Video uploaded successfully"
+    )
+
+    return VideoUploadResponse(
+        status=status_msg,
+        message=message,
+        gcs_path=gcs_url,
+        user_id=user_id,
+        project_id=None,
+        filename=safe_filename,
+        file_size_mb=round(file_size_bytes / 1024 / 1024, 2),
+        overwritten=was_overwritten,
     )
 
 
