@@ -56,8 +56,8 @@ async def extract_audio_from_video(
     if output_dir:
         target_dir = output_dir
     else:
-        # Default to structured storage: thumbnail-alchemist-media/derived-media/{project_id}/audio
-        target_dir = Path("thumbnail-alchemist-media") / "derived-media" / project_id / "audio"
+        # Default to structured storage: clickmoment-prod-assets/projects/{project_id}/signals/audio
+        target_dir = Path("clickmoment-prod-assets") / "projects" / project_id / "signals" / "audio"
 
     target_dir.mkdir(parents=True, exist_ok=True)
     output_path = target_dir / "audio.wav"
@@ -89,11 +89,17 @@ async def extract_audio_from_video(
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    await process.communicate()
+    stdout, stderr = await process.communicate()
 
-    if process.returncode == 0 and output_path.exists():
+    if process.returncode != 0:
+        error_msg = stderr.decode() if stderr else "Unknown error"
+        print(f"ffmpeg failed with return code {process.returncode}: {error_msg}")
+        return None
+
+    if output_path.exists():
         return output_path
 
+    print(f"ffmpeg succeeded but output file not found at {output_path}")
     return None
 
 
@@ -221,6 +227,7 @@ async def transcribe_and_analyze_audio(
     Returns:
         Dictionary containing comprehensive audio timeline with:
             - timeline: Time-aligned key events (20-50 events, not word-level)
+                       All timestamps in milliseconds (start_ms, end_ms, time_ms)
             - transcript: Full text transcript
             - speakers: List of detected speakers with IDs
             - duration_seconds: Total audio duration
@@ -267,8 +274,8 @@ async def transcribe_and_analyze_audio(
 
                 segment_event = {
                     "type": "segment",
-                    "start": segment.start,
-                    "end": segment.end,
+                    "start_ms": int(segment.start * 1000),
+                    "end_ms": int(segment.end * 1000),
                     "text": segment.text,
                     "avg_energy": segment_features["avg_energy"],
                     "avg_pitch": segment_features["avg_pitch"],
@@ -289,7 +296,7 @@ async def transcribe_and_analyze_audio(
                     timeline.append(
                         {
                             "type": "speaker_turn",
-                            "time": segment.start,
+                            "time_ms": int(segment.start * 1000),
                             "from_speaker": prev_speaker,
                             "to_speaker": current_speaker,
                         }
@@ -310,9 +317,9 @@ async def transcribe_and_analyze_audio(
                     timeline.append(
                         {
                             "type": "pause",
-                            "start": silence_start,
-                            "end": time,
-                            "duration": time - silence_start,
+                            "start_ms": int(silence_start * 1000),
+                            "end_ms": int(time * 1000),
+                            "duration_ms": int((time - silence_start) * 1000),
                         }
                     )
                 in_silence = False
@@ -323,7 +330,7 @@ async def transcribe_and_analyze_audio(
             timeline.append(
                 {
                     "type": "energy_peak",
-                    "time": peak["time"],
+                    "time_ms": int(peak["time"] * 1000),
                     "energy": peak["energy"],
                     "context": "high_energy_moment",
                 }
@@ -335,14 +342,14 @@ async def transcribe_and_analyze_audio(
             timeline.append(
                 {
                     "type": "music_section",
-                    "start": section["start"],
-                    "end": section["end"],
+                    "start_ms": int(section["start"] * 1000),
+                    "end_ms": int(section["end"] * 1000),
                     "intensity": section["intensity"],
                 }
             )
 
         # Sort timeline by start time
-        timeline.sort(key=lambda x: x.get("start", x.get("time", 0)))
+        timeline.sort(key=lambda x: x.get("start_ms", x.get("time_ms", 0)))
 
         # Calculate overall tone characteristics
         speech_tone = {
@@ -386,7 +393,7 @@ async def transcribe_and_analyze_audio(
         # Save timeline to JSON if requested
         if save_timeline:
             timeline_dir = (
-                Path("thumbnail-alchemist-media") / "derived-media" / project_id / "audio"
+                Path("clickmoment-prod-assets") / "projects" / project_id / "signals" / "audio"
             )
             timeline_dir.mkdir(parents=True, exist_ok=True)
             timeline_path = timeline_dir / "audio_timeline.json"
