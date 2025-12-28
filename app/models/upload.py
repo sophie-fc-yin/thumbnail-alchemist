@@ -129,3 +129,52 @@ class SignedUrlResponse(BaseModel):
             ]
         }
     }
+
+
+class VideoUrlRequest(BaseModel):
+    """Request for generating a signed URL to view/download a video."""
+
+    gcs_path: str = Field(
+        ...,
+        description="GCS path of the video to access (gs://bucket/path or just the path)",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "gcs_path": "gs://clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/my-video.mp4"
+                },
+                {"gcs_path": "users/120accfe-aa23-41a3-b04f-36f581714d52/videos/my-video.mp4"},
+            ]
+        }
+    }
+
+
+class VideoUrlResponse(BaseModel):
+    """Response containing signed URL for viewing/downloading a video."""
+
+    signed_url: str = Field(
+        ...,
+        description="Signed URL for viewing/downloading the video from GCS",
+    )
+    gcs_path: str = Field(
+        ...,
+        description="GCS path of the video (gs://bucket/path)",
+    )
+    expires_in_seconds: int = Field(
+        default=3600,
+        description="Number of seconds until the signed URL expires",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "signed_url": "https://storage.googleapis.com/clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/my-video.mp4?X-Goog-Algorithm=...",
+                    "gcs_path": "gs://clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/my-video.mp4",
+                    "expires_in_seconds": 3600,
+                }
+            ]
+        }
+    }

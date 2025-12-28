@@ -28,6 +28,8 @@ from app.models.upload import (
     SignedUrlResponse,
     VideoUploadError,
     VideoUploadResponse,
+    VideoUrlRequest,
+    VideoUrlResponse,
 )
 
 # Vision models
@@ -67,4 +69,6 @@ __all__ = [
     "SignedUrlResponse",
     "VideoUploadError",
     "VideoUploadResponse",
+    "VideoUrlRequest",
+    "VideoUrlResponse",
 ]
