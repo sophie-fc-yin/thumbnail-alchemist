@@ -7,12 +7,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.adaptive_sampling import orchestrate_adaptive_sampling
 from app.audio_media import extract_audio_from_video, transcribe_and_analyze_audio
 from app.models import (
+    AdaptiveSamplingResponse,
     AudioBreakdownRequest,
     AudioBreakdownResponse,
     CompositionLayer,
     FrameScore,
+    PaceSegment,
+    PaceStatistics,
+    ProcessingStats,
+    SignedUrlRequest,
+    SignedUrlResponse,
     SourceMedia,
     ThumbnailRequest,
     ThumbnailResponse,
@@ -21,7 +28,7 @@ from app.models import (
     VisionBreakdownRequest,
     VisionBreakdownResponse,
 )
-from app.storage import StorageError, upload_file_to_gcs
+from app.storage import StorageError, generate_signed_upload_url, upload_file_to_gcs
 from app.vision_media import extract_candidate_frames, validate_and_load_content
 from app.vision_stack import analyze_frame_quality, rank_frames
 
@@ -41,7 +48,7 @@ app.add_middleware(
 )
 
 # Video Upload Configuration
-MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
+MAX_VIDEO_SIZE_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv"}
 ALLOWED_VIDEO_MIMETYPES = {
     "video/mp4",
@@ -318,6 +325,50 @@ async def breakdown_vision(payload: VisionBreakdownRequest) -> VisionBreakdownRe
     )
 
 
+@app.post("/vision/adaptive-sampling", response_model=AdaptiveSamplingResponse)
+async def adaptive_sampling(payload: VisionBreakdownRequest) -> AdaptiveSamplingResponse:
+    """
+    Extract frames using adaptive pace-based sampling.
+
+    This endpoint orchestrates the full pipeline:
+    1. Audio breakdown → extract audio timeline
+    2. Initial sparse sampling → sample frames for pace analysis
+    3. Face analysis → detect expressions and motion
+    4. Pace calculation → combine audio + visual signals
+    5. Adaptive extraction → dense sampling where pace is high
+    6. Storage → upload all frames to GCS
+
+    Returns frames with pace segments and processing statistics.
+    """
+    # Use provided project_id or generate new one
+    project_id = payload.project_id or str(uuid4())
+
+    print(f"[API] Starting adaptive sampling for project {project_id}")
+
+    # Run orchestrated pipeline
+    result = await orchestrate_adaptive_sampling(
+        video_path=payload.video_path,
+        project_id=project_id,
+        max_frames=payload.max_frames,
+        upload_to_gcs=True,
+    )
+
+    # Convert to response model
+    response = AdaptiveSamplingResponse(
+        project_id=project_id,
+        frames=result["frames"],
+        total_frames=len(result["frames"]),
+        pace_segments=[PaceSegment(**seg) for seg in result["pace_segments"]],
+        pace_statistics=PaceStatistics(**result["pace_statistics"]),
+        processing_stats=ProcessingStats(**result["processing_stats"]),
+        summary=result["summary"],
+    )
+
+    print(f"[API] Adaptive sampling complete: {response.total_frames} frames extracted")
+
+    return response
+
+
 @app.post("/thumbnails/generate", response_model=ThumbnailResponse)
 async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     # Use provided project_id or generate new one
@@ -413,6 +464,71 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
 
 
 @app.post(
+    "/get-upload-url",
+    response_model=SignedUrlResponse,
+    responses={
+        500: {"description": "Failed to generate signed URL"},
+    },
+    tags=["Video Upload"],
+)
+async def get_upload_url(payload: SignedUrlRequest) -> SignedUrlResponse:
+    """
+    Generate a signed URL for direct client upload to GCS.
+
+    The client can use this signed URL to upload files directly to Google Cloud Storage
+    without going through the backend server, which is more efficient for large files.
+
+    **Usage:**
+    1. Call this endpoint with filename, user_id, and content_type
+    2. Receive a signed URL that's valid for 1 hour
+    3. Upload file directly to GCS using PUT request to the signed URL
+    4. Use the returned gcs_path for subsequent API calls
+
+    **Example:**
+    ```bash
+    # Step 1: Get signed URL
+    curl -X POST "http://localhost:9000/get-upload-url" \\
+      -H "Content-Type: application/json" \\
+      -d '{
+        "user_id": "120accfe-aa23-41a3-b04f-36f581714d52",
+        "filename": "my-video.mp4",
+        "content_type": "video/mp4"
+      }'
+
+    # Step 2: Upload file using the signed URL
+    curl -X PUT "<signed_url_from_response>" \\
+      -H "Content-Type: video/mp4" \\
+      --upload-file /path/to/my-video.mp4
+    ```
+    """
+    # Sanitize filename
+    safe_filename = sanitize_filename(payload.filename)
+
+    # Generate signed URL
+    try:
+        signed_url, gcs_path = generate_signed_upload_url(
+            filename=safe_filename,
+            user_id=payload.user_id,
+            content_type=payload.content_type,
+            subfolder=payload.subfolder,
+        )
+    except StorageError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Failed to generate signed URL",
+                "detail": str(e),
+            },
+        ) from e
+
+    return SignedUrlResponse(
+        signed_url=signed_url,
+        gcs_path=gcs_path,
+        expires_in_seconds=3600,
+    )
+
+
+@app.post(
     "/videos/upload",
     response_model=VideoUploadResponse,
     responses={
@@ -431,7 +547,7 @@ async def upload_video(
     Upload a video file to cloud storage.
 
     **File Requirements:**
-    - Max size: 500 MB
+    - Max size: 5 GB
     - Allowed formats: mp4, mov, avi, mkv, webm, flv
 
     **Storage Path:**
@@ -456,7 +572,7 @@ async def upload_video(
                 "error": "Unsupported file format",
                 "detail": f"File extension '{file_ext}' not allowed",
                 "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
-                "max_size_mb": 500,
+                "max_size_gb": 5,
             },
         )
 
@@ -468,7 +584,7 @@ async def upload_video(
                 "error": "Unsupported media type",
                 "detail": f"Content-Type '{file.content_type}' not allowed",
                 "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
-                "max_size_mb": 500,
+                "max_size_gb": 5,
             },
         )
 
@@ -482,9 +598,9 @@ async def upload_video(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail={
                 "error": "File too large",
-                "detail": f"File size {file_size_bytes / 1024 / 1024:.1f} MB exceeds limit of 500 MB",
+                "detail": f"File size {file_size_bytes / 1024 / 1024 / 1024:.2f} GB exceeds limit of 5 GB",
                 "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
-                "max_size_mb": 500,
+                "max_size_gb": 5,
             },
         )
 
@@ -505,7 +621,7 @@ async def upload_video(
                 "error": "Upload failed",
                 "detail": str(e),
                 "allowed_formats": list(ALLOWED_VIDEO_EXTENSIONS),
-                "max_size_mb": 500,
+                "max_size_gb": 5,
             },
         ) from e
 

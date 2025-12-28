@@ -18,7 +18,7 @@ from app.vision_media import MediaValidationError, generate_signed_url
 async def extract_audio_from_video(
     content_sources: SourceMedia,
     project_id: str,
-    max_duration_seconds: int = 600,
+    max_duration_seconds: int = 1800,
     output_dir: Path | None = None,
     ffmpeg_binary: str | None = None,
 ) -> Path | None:
@@ -31,7 +31,7 @@ async def extract_audio_from_video(
     Args:
         content_sources: SourceMedia containing video_path (GCS URL, other URL, or local path)
         project_id: Unique identifier for the project (used to organize output files)
-        max_duration_seconds: Maximum duration to extract in seconds (default: 600 = 10 minutes)
+        max_duration_seconds: Maximum duration to extract in seconds (default: 1800 = 30 minutes)
         output_dir: Custom output directory for extracted audio (overrides default structure)
         ffmpeg_binary: Path to ffmpeg binary (auto-detected if None)
 
@@ -284,6 +284,15 @@ async def transcribe_and_analyze_audio(
                 # Add speaker info from diarization (if available)
                 if hasattr(segment, "speaker") and segment.speaker:
                     segment_event["speaker"] = segment.speaker
+
+                # Calculate audio score for this segment
+                audio_scores = calculate_audio_score(
+                    segment=segment_event,
+                    audio_features=audio_features,
+                )
+
+                # Add audio score components to segment
+                segment_event.update(audio_scores)
 
                 timeline.append(segment_event)
 
@@ -555,3 +564,347 @@ def _detect_music_sections(audio_features: dict, energy_threshold: float = 0.1) 
             in_section = False
 
     return sections
+
+
+# ============================================================================
+# AUDIO SCORING COMPONENTS
+# ============================================================================
+
+
+def calculate_speech_gate(
+    segment: dict,
+    speech_confidence_threshold: float = 0.5,
+) -> float:
+    """
+    Calculate speech gate: binary gate based on speech confidence.
+
+    Formula:
+        speech_gate = 1.0 if speech_confidence ≥ threshold
+                      0.0 otherwise
+
+    Speech confidence is derived from:
+    - Text presence (transcription exists)
+    - Speaker assignment (diarization confidence)
+
+    Args:
+        segment: Timeline segment with text and speaker fields
+        speech_confidence_threshold: Confidence threshold (default: 0.5)
+
+    Returns:
+        Binary speech gate: 1.0 if speech present, 0.0 otherwise
+    """
+    # Speech confidence from text presence
+    has_text = bool(segment.get("text", "").strip())
+
+    # Higher confidence if speaker is assigned (diarization worked)
+    has_speaker = bool(segment.get("speaker"))
+
+    # Combine confidence signals
+    # - Text present = 0.8 confidence
+    # - Text + speaker = 1.0 confidence
+    if has_text and has_speaker:
+        speech_confidence = 1.0
+    elif has_text:
+        speech_confidence = 0.8
+    else:
+        speech_confidence = 0.0
+
+    # Binary gate
+    return 1.0 if speech_confidence >= speech_confidence_threshold else 0.0
+
+
+def calculate_text_importance(
+    segment: dict,
+    claim_keywords: list[str] | None = None,
+    emphasis_keywords: list[str] | None = None,
+    filler_keywords: list[str] | None = None,
+) -> float:
+    """
+    Calculate text importance based on categorical content analysis.
+
+    Formula:
+        text_importance = 1.0  (strong claim / reveal)
+                          0.7  (emphasis / contrast)
+                          0.4  (neutral explanation)
+                          0.1  (filler)
+
+    Args:
+        segment: Timeline segment with text field
+        claim_keywords: Keywords indicating strong claims/reveals
+        emphasis_keywords: Keywords indicating emphasis/contrast
+        filler_keywords: Keywords indicating filler content
+
+    Returns:
+        Text importance score: 1.0, 0.7, 0.4, or 0.1
+    """
+    text = segment.get("text", "").strip()
+
+    if not text:
+        return 0.1  # Empty text = filler
+
+    text_lower = text.lower()
+
+    # Default keyword lists
+    if claim_keywords is None:
+        claim_keywords = [
+            "discovered",
+            "revealed",
+            "found",
+            "proved",
+            "demonstrated",
+            "breakthrough",
+            "amazing",
+            "incredible",
+            "shocking",
+            "secret",
+            "truth",
+            "fact",
+            "evidence",
+            "research shows",
+            "study found",
+            "this is",
+            "here's why",
+            "the reason",
+            "turns out",
+        ]
+
+    if emphasis_keywords is None:
+        emphasis_keywords = [
+            "but",
+            "however",
+            "although",
+            "instead",
+            "actually",
+            "important",
+            "key",
+            "crucial",
+            "critical",
+            "essential",
+            "remember",
+            "note",
+            "pay attention",
+            "listen",
+            "focus",
+            "versus",
+            "compared to",
+            "unlike",
+            "difference",
+        ]
+
+    if filler_keywords is None:
+        filler_keywords = [
+            "um",
+            "uh",
+            "like",
+            "you know",
+            "i mean",
+            "sort of",
+            "kind of",
+            "basically",
+            "literally",
+            "just",
+        ]
+
+    # Check for strong claims/reveals (highest priority)
+    has_claim = any(kw in text_lower for kw in claim_keywords)
+    has_reveal_markers = any(marker in text for marker in ["!", "?", "...", "—"])
+
+    if has_claim or (has_reveal_markers and len(text.split()) > 10):
+        return 1.0  # Strong claim / reveal
+
+    # Check for emphasis/contrast
+    has_emphasis = any(kw in text_lower for kw in emphasis_keywords)
+    has_caps = any(word.isupper() and len(word) > 2 for word in text.split())
+
+    if has_emphasis or has_caps:
+        return 0.7  # Emphasis / contrast
+
+    # Check for filler
+    has_filler = any(kw in text_lower for kw in filler_keywords)
+    is_short = len(text.split()) < 5
+
+    if has_filler or is_short:
+        return 0.1  # Filler
+
+    # Default: neutral explanation
+    return 0.4
+
+
+def calculate_emphasis_score(
+    segment: dict,
+    audio_features: dict,
+    window_seconds: float = 5.0,
+) -> float:
+    """
+    Calculate emphasis score using local energy deviation from rolling baseline.
+
+    Formula:
+        emphasis_score = clamp(
+            (local_energy - rolling_baseline) / rolling_std,
+            0, 1
+        )
+
+    This measures how much the segment's energy stands out from the
+    surrounding audio context.
+
+    Args:
+        segment: Timeline segment with start_ms, end_ms
+        audio_features: Audio features dict from analyze_audio_features
+        window_seconds: Window size for rolling baseline (default: 5.0s)
+
+    Returns:
+        Emphasis score [0, 1] where:
+            - 1.0: Energy significantly above baseline (strong emphasis)
+            - 0.5: Energy moderately above baseline
+            - 0.0: Energy at or below baseline
+    """
+    start_s = segment.get("start_ms", 0) / 1000.0
+    end_s = segment.get("end_ms", 0) / 1000.0
+
+    # Get segment features
+    segment_features = _get_segment_features(start_s, end_s, audio_features)
+    local_energy = segment_features["avg_energy"]
+
+    # Calculate rolling baseline and std using window around segment
+    times = np.array(audio_features["times"])
+    energies = np.array(audio_features["energy"])
+
+    # Find center of segment
+    segment_center = (start_s + end_s) / 2.0
+
+    # Get window around segment for baseline calculation
+    window_start = segment_center - window_seconds / 2.0
+    window_end = segment_center + window_seconds / 2.0
+
+    # Get energies in window
+    window_mask = (times >= window_start) & (times <= window_end)
+    window_energies = energies[window_mask]
+
+    if len(window_energies) < 2:
+        # Not enough data for baseline, use global baseline
+        rolling_baseline = float(np.mean(energies))
+        rolling_std = float(np.std(energies))
+    else:
+        rolling_baseline = float(np.mean(window_energies))
+        rolling_std = float(np.std(window_energies))
+
+    # Avoid division by zero
+    if rolling_std < 1e-6:
+        rolling_std = 1e-6
+
+    # Calculate normalized deviation
+    emphasis = (local_energy - rolling_baseline) / rolling_std
+
+    # Clamp to [0, 1]
+    return max(0.0, min(emphasis, 1.0))
+
+
+def calculate_bgm_penalty(
+    segment: dict,
+    audio_features: dict,
+) -> float:
+    """
+    Calculate background music penalty based on energy variance.
+
+    Formula:
+        bgm_penalty = clamp(1 - energy_variance_normalized, 0.2, 1.0)
+
+    Background music typically has high energy variance (rhythm, beats).
+    Speech has more consistent energy (smoother envelope).
+
+    Args:
+        segment: Timeline segment with start_ms, end_ms
+        audio_features: Audio features dict from analyze_audio_features
+
+    Returns:
+        BGM penalty multiplier [0.2, 1.0] where:
+            - 1.0: Low variance (clean speech, no music)
+            - 0.5-1.0: Moderate variance (light music or animated speech)
+            - 0.2: High variance (strong background music)
+    """
+    start_s = segment.get("start_ms", 0) / 1000.0
+    end_s = segment.get("end_ms", 0) / 1000.0
+
+    # Get energies in segment
+    times = audio_features["times"]
+    indices = [i for i, t in enumerate(times) if start_s <= t <= end_s]
+
+    if not indices:
+        return 1.0  # No data, assume no penalty
+
+    energies = [audio_features["energy"][i] for i in indices]
+
+    if len(energies) < 2:
+        return 1.0  # Not enough data for variance
+
+    # Calculate energy variance
+    energy_variance = float(np.var(energies))
+
+    # Normalize variance to [0, 1] using typical ranges
+    # Typical speech: variance ~ 0.001-0.01
+    # Music: variance ~ 0.01-0.1+
+    max_variance = 0.05  # Threshold for max penalty
+    energy_variance_normalized = min(energy_variance / max_variance, 1.0)
+
+    # Calculate penalty
+    penalty = 1.0 - energy_variance_normalized
+
+    # Clamp to [0.2, 1.0]
+    return max(0.2, min(penalty, 1.0))
+
+
+def calculate_audio_score(
+    segment: dict,
+    audio_features: dict,
+    claim_keywords: list[str] | None = None,
+    emphasis_keywords: list[str] | None = None,
+    filler_keywords: list[str] | None = None,
+) -> dict[str, float]:
+    """
+    Calculate comprehensive audio score using all components.
+
+    Formula:
+        audio_score = speech_gate × text_importance × emphasis_score × bgm_penalty
+
+    Where:
+        - speech_gate: Binary gate (1.0 if speech, 0.0 otherwise)
+        - text_importance: Categorical (1.0=claim, 0.7=emphasis, 0.4=neutral, 0.1=filler)
+        - emphasis_score: Energy deviation from baseline [0, 1]
+        - bgm_penalty: Music penalty based on variance [0.2, 1.0]
+
+    Args:
+        segment: Timeline segment with start_ms, end_ms, text
+        audio_features: Audio features dict from analyze_audio_features
+        claim_keywords: Keywords for strong claims/reveals
+        emphasis_keywords: Keywords for emphasis/contrast
+        filler_keywords: Keywords for filler content
+
+    Returns:
+        Dictionary with all component scores and final audio_score:
+            - speech_gate: Binary [0, 1]
+            - text_importance: Categorical [0.1, 0.4, 0.7, 1.0]
+            - emphasis_score: [0, 1]
+            - bgm_penalty: [0.2, 1.0]
+            - audio_score: Product of all components
+    """
+    # Calculate individual components
+    speech_gate = calculate_speech_gate(segment)
+    text_importance = calculate_text_importance(
+        segment,
+        claim_keywords=claim_keywords,
+        emphasis_keywords=emphasis_keywords,
+        filler_keywords=filler_keywords,
+    )
+    emphasis_score = calculate_emphasis_score(segment, audio_features)
+    bgm_penalty = calculate_bgm_penalty(segment, audio_features)
+
+    # Final score (multiplicative)
+    audio_score = speech_gate * text_importance * emphasis_score * bgm_penalty
+
+    return {
+        "speech_gate": speech_gate,
+        "text_importance": text_importance,
+        "emphasis_score": emphasis_score,
+        "bgm_penalty": bgm_penalty,
+        "audio_score": audio_score,
+    }

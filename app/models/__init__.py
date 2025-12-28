@@ -23,11 +23,20 @@ from app.models.thumbnail import (
 )
 
 # Upload models
-from app.models.upload import VideoUploadError, VideoUploadResponse
+from app.models.upload import (
+    SignedUrlRequest,
+    SignedUrlResponse,
+    VideoUploadError,
+    VideoUploadResponse,
+)
 
 # Vision models
 from app.models.vision import (
+    AdaptiveSamplingResponse,
     FrameScore,
+    PaceSegment,
+    PaceStatistics,
+    ProcessingStats,
     VisionBreakdownRequest,
     VisionBreakdownResponse,
 )
@@ -39,7 +48,11 @@ __all__ = [
     "AudioBreakdownRequest",
     "AudioBreakdownResponse",
     # Vision
+    "AdaptiveSamplingResponse",
     "FrameScore",
+    "PaceSegment",
+    "PaceStatistics",
+    "ProcessingStats",
     "VisionBreakdownRequest",
     "VisionBreakdownResponse",
     # Thumbnail
@@ -50,6 +63,8 @@ __all__ = [
     "ThumbnailRequest",
     "ThumbnailResponse",
     # Upload
+    "SignedUrlRequest",
+    "SignedUrlResponse",
     "VideoUploadError",
     "VideoUploadResponse",
 ]

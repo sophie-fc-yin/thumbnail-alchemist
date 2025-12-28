@@ -1,5 +1,7 @@
 """Google Cloud Storage utilities for file uploads."""
 
+from datetime import timedelta
+
 from google.api_core import exceptions as gcs_exceptions
 from google.cloud import storage
 
@@ -91,3 +93,57 @@ async def upload_file_to_gcs(
         raise
     except Exception as e:
         raise StorageError(f"Unexpected upload error: {str(e)}") from e
+
+
+def generate_signed_upload_url(
+    filename: str,
+    user_id: str,
+    content_type: str = "video/mp4",
+    bucket_name: str = "clickmoment-prod-assets",
+    base_path: str = "users",
+    subfolder: str = "videos",
+    expiration_seconds: int = 3600,
+) -> tuple[str, str]:
+    """
+    Generate a signed URL for direct client upload to GCS.
+
+    Args:
+        filename: Name of the file to be uploaded (should be sanitized)
+        user_id: User ID from authentication
+        content_type: MIME type of the file
+        bucket_name: GCS bucket name
+        base_path: Base path prefix (e.g., "users")
+        subfolder: Subfolder within user directory (e.g., "videos", "avatar", "brand")
+        expiration_seconds: Number of seconds until the signed URL expires
+
+    Returns:
+        Tuple of (signed_url, gcs_path)
+
+    Raises:
+        StorageError: If signed URL generation fails
+    """
+    try:
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
+
+        # Construct path: users/{user_id}/videos/{filename}
+        blob_path = f"{base_path}/{user_id}/{subfolder}/{filename}"
+        blob = bucket.blob(blob_path)
+
+        # Generate signed URL for PUT operation
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(seconds=expiration_seconds),
+            method="PUT",
+            content_type=content_type,
+        )
+
+        # Construct GCS path
+        gcs_path = f"gs://{bucket_name}/{blob_path}"
+
+        return signed_url, gcs_path
+
+    except gcs_exceptions.GoogleAPIError as e:
+        raise StorageError(f"Failed to generate signed URL: {str(e)}") from e
+    except Exception as e:
+        raise StorageError(f"Unexpected error generating signed URL: {str(e)}") from e
