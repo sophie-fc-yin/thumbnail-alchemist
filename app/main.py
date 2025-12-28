@@ -25,10 +25,17 @@ from app.models import (
     ThumbnailResponse,
     VideoUploadError,
     VideoUploadResponse,
+    VideoUrlRequest,
+    VideoUrlResponse,
     VisionBreakdownRequest,
     VisionBreakdownResponse,
 )
-from app.storage import StorageError, generate_signed_upload_url, upload_file_to_gcs
+from app.storage import (
+    StorageError,
+    generate_signed_download_url,
+    generate_signed_upload_url,
+    upload_file_to_gcs,
+)
 from app.vision_media import extract_candidate_frames, validate_and_load_content
 from app.vision_stack import analyze_frame_quality, rank_frames
 
@@ -522,6 +529,84 @@ async def get_upload_url(payload: SignedUrlRequest) -> SignedUrlResponse:
         ) from e
 
     return SignedUrlResponse(
+        signed_url=signed_url,
+        gcs_path=gcs_path,
+        expires_in_seconds=3600,
+    )
+
+
+@app.post(
+    "/get-video-url",
+    response_model=VideoUrlResponse,
+    responses={
+        404: {"description": "Video not found"},
+        500: {"description": "Failed to generate signed URL"},
+    },
+    tags=["Video Upload"],
+)
+async def get_video_url(payload: VideoUrlRequest) -> VideoUrlResponse:
+    """
+    Generate a signed URL for viewing/downloading an existing video from GCS.
+
+    This endpoint generates a temporary signed URL that allows reading a video file
+    from Google Cloud Storage without requiring authentication. The URL is valid
+    for 1 hour.
+
+    **Usage:**
+    1. Call this endpoint with the GCS path of an existing video
+    2. Receive a signed URL that's valid for 1 hour
+    3. Use the signed URL to view/download the video (GET request)
+
+    **Example:**
+    ```bash
+    curl -X POST "http://localhost:9000/get-video-url" \\
+      -H "Content-Type: application/json" \\
+      -d '{
+        "gcs_path": "gs://clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/my-video.mp4"
+      }'
+    ```
+
+    You can also provide just the path without the gs:// prefix:
+    ```bash
+    curl -X POST "http://localhost:9000/get-video-url" \\
+      -H "Content-Type: application/json" \\
+      -d '{
+        "gcs_path": "users/120accfe-aa23-41a3-b04f-36f581714d52/videos/my-video.mp4"
+      }'
+    ```
+    """
+    # Generate signed URL for viewing/downloading
+    try:
+        signed_url = generate_signed_download_url(
+            gcs_path=payload.gcs_path,
+        )
+
+        # Normalize GCS path to gs:// format
+        if payload.gcs_path.startswith("gs://"):
+            gcs_path = payload.gcs_path
+        else:
+            gcs_path = f"gs://clickmoment-prod-assets/{payload.gcs_path}"
+
+    except StorageError as e:
+        # Check if it's a file not found error
+        if "File not found" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "Video not found",
+                    "detail": str(e),
+                },
+            ) from e
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": "Failed to generate signed URL",
+                    "detail": str(e),
+                },
+            ) from e
+
+    return VideoUrlResponse(
         signed_url=signed_url,
         gcs_path=gcs_path,
         expires_in_seconds=3600,
