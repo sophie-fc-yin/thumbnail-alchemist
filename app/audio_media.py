@@ -23,15 +23,15 @@ async def extract_audio_from_video(
     ffmpeg_binary: str | None = None,
 ) -> dict[str, Path] | None:
     """
-    Extract audio from video with speech/music lane separation.
+    Extract audio from video with speech/full-audio separation.
 
-    Creates two audio lanes:
-    1. Speech lane: Isolated spoken voice (creator talking) for ASR/transcription
+    Creates two audio files:
+    1. Speech: Isolated spoken voice (creator talking) for ASR/transcription
        - Uses Silero VAD to detect speech segments
        - Filters out singing using pitch analysis
        - Only contains spoken dialogue/narration
-    2. Music lane: Full spectrum audio for music/energy analysis
-       - Contains everything (music, singing, effects, speech)
+    2. Full Audio: Complete audio track for music/energy analysis
+       - Contains everything (speech, music, singing, effects)
        - Normalized for consistent measurements
 
     Args:
@@ -44,10 +44,10 @@ async def extract_audio_from_video(
     Returns:
         Dictionary with audio paths, or None if extraction failed:
         {
-            "speech": Path("audio_speech.wav"),  # Speech-only lane
-            "music": Path("audio_music.wav"),    # Full audio lane
-            "speech_ratio": 0.42,                # % of video that's speech
-            "segments": [...]                     # Speech segment timestamps
+            "speech": Path("audio_speech.wav"),      # Speech-only
+            "full_audio": Path("audio_full.wav"),    # Complete audio
+            "speech_ratio": 0.42,                    # % of video that's speech
+            "segments": [...]                         # Speech segment timestamps
         }
     """
     video_source = content_sources.video_path
@@ -72,10 +72,10 @@ async def extract_audio_from_video(
         target_dir = Path("clickmoment-prod-assets") / "projects" / project_id / "signals" / "audio"
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    music_path = target_dir / "audio_music.wav"
+    full_audio_path = target_dir / "audio_full.wav"
     speech_path = target_dir / "audio_speech.wav"
 
-    # STEP 1: Extract full audio (music lane) using ffmpeg streaming
+    # STEP 1: Extract full audio using ffmpeg streaming
     # -t limits duration to max_duration_seconds
     # -vn removes video stream (audio only)
     # -af loudnorm normalizes audio volume for consistent analysis
@@ -100,7 +100,7 @@ async def extract_audio_from_video(
         "1",  # Mono
         "-ar",
         "16000",  # 16kHz sample rate (required for Silero VAD)
-        str(music_path),
+        str(full_audio_path),
         "-y",  # Overwrite output file
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -112,8 +112,8 @@ async def extract_audio_from_video(
         print(f"ffmpeg failed with return code {process.returncode}: {error_msg}")
         return None
 
-    if not music_path.exists():
-        print(f"ffmpeg succeeded but output file not found at {music_path}")
+    if not full_audio_path.exists():
+        print(f"ffmpeg succeeded but output file not found at {full_audio_path}")
         return None
 
     # STEP 2: Detect speech segments and create speech-only lane
@@ -121,7 +121,7 @@ async def extract_audio_from_video(
 
     try:
         speech_result = detect_speech_in_audio(
-            audio_path=music_path,
+            audio_path=full_audio_path,
             output_speech_path=speech_path,
             filter_singing=True,  # Filter out singing vocals
         )
@@ -134,7 +134,7 @@ async def extract_audio_from_video(
 
         return {
             "speech": speech_path,
-            "music": music_path,
+            "full_audio": full_audio_path,
             "speech_ratio": speech_result["speech_ratio"],
             "segments": speech_result["segments"],
             "total_duration": speech_result["total_duration"],
@@ -143,10 +143,10 @@ async def extract_audio_from_video(
 
     except Exception as e:
         print(f"Speech detection failed: {e}")
-        # Fallback: return music lane only, use it for both
+        # Fallback: return full audio only, use it for both
         return {
-            "speech": music_path,  # Use full audio as fallback
-            "music": music_path,
+            "speech": full_audio_path,  # Use full audio as fallback
+            "full_audio": full_audio_path,
             "speech_ratio": 1.0,
             "segments": [],
             "total_duration": 0.0,

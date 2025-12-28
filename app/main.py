@@ -126,7 +126,7 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     # Create SourceMedia object for audio processing
     source_media = SourceMedia(video_path=payload.video_path)
 
-    # Extract audio from video (speech and music lanes)
+    # Extract audio from video (speech and full audio)
     try:
         audio_result = await extract_audio_from_video(
             content_sources=source_media,
@@ -155,7 +155,7 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     from google.cloud import storage
 
     gcs_speech_url = str(speech_path)  # Default to local path
-    gcs_music_url = str(audio_result["music"])
+    gcs_full_audio_url = str(audio_result["full_audio"])
 
     try:
         client = storage.Client()
@@ -167,18 +167,18 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
         speech_blob.upload_from_filename(str(speech_path))
         gcs_speech_url = f"gs://clickmoment-prod-assets/{speech_blob_path}"
 
-        # Upload music audio file (full audio)
-        music_path = Path(audio_result["music"])
-        music_blob_path = f"projects/{project_id}/signals/audio/audio_music.wav"
-        music_blob = bucket.blob(music_blob_path)
-        music_blob.upload_from_filename(str(music_path))
-        gcs_music_url = f"gs://clickmoment-prod-assets/{music_blob_path}"
+        # Upload full audio file (complete audio track)
+        full_audio_path = Path(audio_result["full_audio"])
+        full_audio_blob_path = f"projects/{project_id}/signals/audio/audio_full.wav"
+        full_audio_blob = bucket.blob(full_audio_blob_path)
+        full_audio_blob.upload_from_filename(str(full_audio_path))
+        gcs_full_audio_url = f"gs://clickmoment-prod-assets/{full_audio_blob_path}"
 
         # Delete local audio files after upload
         Path(speech_path).unlink()
-        music_path.unlink()
+        full_audio_path.unlink()
         print(f"Uploaded speech audio to {gcs_speech_url}")
-        print(f"Uploaded music audio to {gcs_music_url}")
+        print(f"Uploaded full audio to {gcs_full_audio_url}")
 
         # Upload timeline JSON if it exists
         if "timeline_path" in analysis:
