@@ -240,17 +240,36 @@ async def transcribe_and_analyze_audio(
         MediaValidationError: If transcription/analysis fails
     """
     try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client = OpenAI(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            timeout=300.0,  # 5 minutes for large audio files
+        )
 
         # STEP 1: GPT-4o Transcribe Diarize - Transcription + Speaker Diarization
-        with open(audio_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                model="gpt-4o-transcribe-diarize",
-                file=audio_file,
-                response_format="diarized_json",
-                chunking_strategy="auto",  # Required for audio > 30 seconds
-                language=language,
-            )
+        # Retry logic for network issues
+        max_retries = 3
+        retry_delay = 2.0
+
+        for attempt in range(max_retries):
+            try:
+                with open(audio_path, "rb") as audio_file:
+                    transcription = client.audio.transcriptions.create(
+                        model="gpt-4o-transcribe-diarize",
+                        file=audio_file,
+                        response_format="diarized_json",
+                        chunking_strategy="auto",  # Required for audio > 30 seconds
+                        language=language,
+                    )
+                break  # Success, exit retry loop
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(
+                        f"Transcription attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s..."
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise  # Re-raise on final attempt
 
         # STEP 2: Extract audio features (prosody, tone, music)
         audio_features = await analyze_audio_features(audio_path)
