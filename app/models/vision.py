@@ -53,6 +53,38 @@ class FrameScore(BaseModel):
     rank: int
 
 
+class PaceSegment(BaseModel):
+    """Pace segment information."""
+
+    start_time: float = Field(..., description="Segment start in seconds")
+    end_time: float = Field(..., description="Segment end in seconds")
+    avg_pace: float = Field(..., description="Average pace score [0, 1]")
+    pace_category: str = Field(..., description="Pace category: low, medium, or high")
+
+
+class PaceStatistics(BaseModel):
+    """Overall pace statistics."""
+
+    avg_pace: float = Field(..., description="Average pace across all segments")
+    segment_counts: dict[str, int] = Field(
+        ..., description="Count of low/medium/high pace segments"
+    )
+    total_segments: int = Field(..., description="Total number of pace segments")
+
+
+class ProcessingStats(BaseModel):
+    """Processing time breakdown."""
+
+    audio_time: float = Field(..., description="Audio analysis time in seconds")
+    initial_sampling_time: float = Field(..., description="Initial frame sampling time in seconds")
+    face_analysis_time: float = Field(..., description="Face analysis time in seconds")
+    pace_calculation_time: float = Field(..., description="Pace calculation time in seconds")
+    adaptive_extraction_time: float = Field(
+        ..., description="Adaptive frame extraction time in seconds"
+    )
+    total_time: float = Field(..., description="Total processing time in seconds")
+
+
 class VisionBreakdownResponse(BaseModel):
     """Response from vision breakdown endpoint."""
 
@@ -61,3 +93,15 @@ class VisionBreakdownResponse(BaseModel):
     scored_frames: list[FrameScore]
     best_frame: FrameScore
     summary: str
+
+
+class AdaptiveSamplingResponse(BaseModel):
+    """Response from adaptive sampling endpoint with pace analysis."""
+
+    project_id: str
+    frames: list[str] = Field(..., description="List of frame paths (GCS URLs or local)")
+    total_frames: int = Field(..., description="Total number of frames extracted")
+    pace_segments: list[PaceSegment] = Field(..., description="Video segments grouped by pace")
+    pace_statistics: PaceStatistics = Field(..., description="Overall pace statistics")
+    processing_stats: ProcessingStats = Field(..., description="Processing time breakdown")
+    summary: str = Field(..., description="Human-readable summary")

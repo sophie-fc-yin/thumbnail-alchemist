@@ -26,9 +26,9 @@ class AudioBreakdownRequest(BaseModel):
         examples=["en", "es", "fr"],
     )
     max_duration_seconds: int = Field(
-        600,
-        description="Maximum duration to analyze in seconds (default: 600 = 10 minutes)",
-        examples=[600, 300, 120],
+        1800,
+        description="Maximum duration to analyze in seconds (default: 1800 = 30 minutes)",
+        examples=[1800, 600, 300],
     )
 
     model_config = {
@@ -38,7 +38,7 @@ class AudioBreakdownRequest(BaseModel):
                     "project_id": "60a8336a-3d5d-45eb-a390-b52ab9f2dcb2",
                     "video_path": "gs://clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/1116_1_.mp4",
                     "language": "en",
-                    "max_duration_seconds": 600,
+                    "max_duration_seconds": 1800,
                 }
             ]
         }
