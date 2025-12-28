@@ -126,9 +126,9 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     # Create SourceMedia object for audio processing
     source_media = SourceMedia(video_path=payload.video_path)
 
-    # Extract audio from video
+    # Extract audio from video (speech and music lanes)
     try:
-        audio_path = await extract_audio_from_video(
+        audio_result = await extract_audio_from_video(
             content_sources=source_media,
             project_id=project_id,
             max_duration_seconds=payload.max_duration_seconds,
@@ -136,37 +136,49 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     except Exception as e:
         raise ValueError(f"Failed to extract audio from video: {str(e)}") from e
 
-    if not audio_path:
+    if not audio_result:
         raise ValueError("Failed to extract audio from video: ffmpeg returned no output")
+
+    # Use speech lane for transcription
+    speech_path = audio_result["speech"]
 
     # Analyze audio with transcription and features
     analysis = await transcribe_and_analyze_audio(
-        audio_path=audio_path,
+        audio_path=speech_path,  # Use speech-only lane for better transcription
         project_id=project_id,
         language=payload.language,
     )
 
-    # Upload audio file and timeline JSON to GCS
+    # Upload audio files and timeline JSON to GCS
     from pathlib import Path
 
     from google.cloud import storage
 
-    gcs_audio_url = str(audio_path)  # Default to local path
+    gcs_speech_url = str(speech_path)  # Default to local path
+    gcs_music_url = str(audio_result["music"])
+
     try:
         client = storage.Client()
         bucket = client.bucket("clickmoment-prod-assets")
 
-        # Upload audio file
-        local_audio_path = Path(audio_path)
-        blob_path = f"projects/{project_id}/signals/audio/{local_audio_path.name}"
-        blob = bucket.blob(blob_path)
-        blob.upload_from_filename(str(audio_path))
+        # Upload speech audio file
+        speech_blob_path = f"projects/{project_id}/signals/audio/audio_speech.wav"
+        speech_blob = bucket.blob(speech_blob_path)
+        speech_blob.upload_from_filename(str(speech_path))
+        gcs_speech_url = f"gs://clickmoment-prod-assets/{speech_blob_path}"
 
-        gcs_audio_url = f"gs://clickmoment-prod-assets/{blob_path}"
+        # Upload music audio file (full audio)
+        music_path = Path(audio_result["music"])
+        music_blob_path = f"projects/{project_id}/signals/audio/audio_music.wav"
+        music_blob = bucket.blob(music_blob_path)
+        music_blob.upload_from_filename(str(music_path))
+        gcs_music_url = f"gs://clickmoment-prod-assets/{music_blob_path}"
 
-        # Delete local audio file after upload
-        local_audio_path.unlink()
-        print(f"Uploaded audio to {gcs_audio_url}")
+        # Delete local audio files after upload
+        Path(speech_path).unlink()
+        music_path.unlink()
+        print(f"Uploaded speech audio to {gcs_speech_url}")
+        print(f"Uploaded music audio to {gcs_music_url}")
 
         # Upload timeline JSON if it exists
         if "timeline_path" in analysis:
@@ -193,7 +205,7 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
 
     return AudioBreakdownResponse(
         project_id=project_id,
-        audio_path=gcs_audio_url,
+        audio_path=gcs_speech_url,  # Return speech-only audio path
         transcript=analysis["transcript"],
         duration_seconds=analysis["duration_seconds"],
         speakers=analysis["speakers"],

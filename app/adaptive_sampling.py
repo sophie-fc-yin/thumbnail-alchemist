@@ -78,17 +78,27 @@ async def orchestrate_adaptive_sampling(
     step_start = time.time()
 
     source_media = SourceMedia(video_path=video_path)
-    audio_path = await extract_audio_from_video(
+    audio_result = await extract_audio_from_video(
         content_sources=source_media,
         project_id=project_id,
         max_duration_seconds=1800,
     )
 
-    if not audio_path:
+    if not audio_result:
         raise ValueError("Failed to extract audio from video")
 
+    # Use speech lane for transcription (better accuracy)
+    speech_path = audio_result["speech"]
+    speech_ratio = audio_result.get("speech_ratio", 0.0)
+
+    print(
+        f"[Orchestrator] Audio extraction complete: "
+        f"{speech_ratio:.1%} speech, "
+        f"{len(audio_result.get('segments', []))} speech segments"
+    )
+
     audio_analysis = await transcribe_and_analyze_audio(
-        audio_path=audio_path,
+        audio_path=speech_path,  # Use speech-only lane for transcription
         project_id=project_id,
         language="en",
         save_timeline=True,

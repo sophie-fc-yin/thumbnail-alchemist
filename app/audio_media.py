@@ -21,12 +21,18 @@ async def extract_audio_from_video(
     max_duration_seconds: int = 1800,
     output_dir: Path | None = None,
     ffmpeg_binary: str | None = None,
-) -> Path | None:
+) -> dict[str, Path] | None:
     """
-    Extract audio from video without loading the entire file.
+    Extract audio from video with speech/music lane separation.
 
-    Uses ffmpeg streaming to extract audio progressively. For long videos,
-    extracts only the first N seconds to avoid processing the entire file.
+    Creates two audio lanes:
+    1. Speech lane: Isolated spoken voice (creator talking) for ASR/transcription
+       - Uses Silero VAD to detect speech segments
+       - Filters out singing using pitch analysis
+       - Only contains spoken dialogue/narration
+    2. Music lane: Full spectrum audio for music/energy analysis
+       - Contains everything (music, singing, effects, speech)
+       - Normalized for consistent measurements
 
     Args:
         content_sources: SourceMedia containing video_path (GCS URL, other URL, or local path)
@@ -36,7 +42,13 @@ async def extract_audio_from_video(
         ffmpeg_binary: Path to ffmpeg binary (auto-detected if None)
 
     Returns:
-        Path to extracted audio file (WAV format), or None if extraction failed
+        Dictionary with audio paths, or None if extraction failed:
+        {
+            "speech": Path("audio_speech.wav"),  # Speech-only lane
+            "music": Path("audio_music.wav"),    # Full audio lane
+            "speech_ratio": 0.42,                # % of video that's speech
+            "segments": [...]                     # Speech segment timestamps
+        }
     """
     video_source = content_sources.video_path
     ffmpeg_path = ffmpeg_binary or shutil.which("ffmpeg")
@@ -60,15 +72,16 @@ async def extract_audio_from_video(
         target_dir = Path("clickmoment-prod-assets") / "projects" / project_id / "signals" / "audio"
 
     target_dir.mkdir(parents=True, exist_ok=True)
-    output_path = target_dir / "audio.wav"
+    music_path = target_dir / "audio_music.wav"
+    speech_path = target_dir / "audio_speech.wav"
 
-    # Extract audio using ffmpeg streaming
+    # STEP 1: Extract full audio (music lane) using ffmpeg streaming
     # -t limits duration to max_duration_seconds
     # -vn removes video stream (audio only)
-    # -af loudnorm normalizes audio volume for consistent transcription
+    # -af loudnorm normalizes audio volume for consistent analysis
     # -acodec pcm_s16le for WAV format (16-bit PCM)
-    # -ac 1 converts to mono (reduces file size, sufficient for speech)
-    # -ar 16000 sets sample rate to 16kHz (standard for speech recognition)
+    # -ac 1 converts to mono (reduces file size, sufficient for analysis)
+    # -ar 16000 sets sample rate to 16kHz (standard for VAD)
     process = await asyncio.create_subprocess_exec(
         ffmpeg_path,
         "-hide_banner",
@@ -86,8 +99,8 @@ async def extract_audio_from_video(
         "-ac",
         "1",  # Mono
         "-ar",
-        "16000",  # 16kHz sample rate
-        str(output_path),
+        "16000",  # 16kHz sample rate (required for Silero VAD)
+        str(music_path),
         "-y",  # Overwrite output file
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
@@ -99,11 +112,46 @@ async def extract_audio_from_video(
         print(f"ffmpeg failed with return code {process.returncode}: {error_msg}")
         return None
 
-    if output_path.exists():
-        return output_path
+    if not music_path.exists():
+        print(f"ffmpeg succeeded but output file not found at {music_path}")
+        return None
 
-    print(f"ffmpeg succeeded but output file not found at {output_path}")
-    return None
+    # STEP 2: Detect speech segments and create speech-only lane
+    from app.speech_detection import detect_speech_in_audio
+
+    try:
+        speech_result = detect_speech_in_audio(
+            audio_path=music_path,
+            output_speech_path=speech_path,
+            filter_singing=True,  # Filter out singing vocals
+        )
+
+        print(
+            f"[Audio Extraction] Speech detection complete: "
+            f"{len(speech_result['segments'])} segments, "
+            f"{speech_result['speech_ratio']:.1%} speech ratio"
+        )
+
+        return {
+            "speech": speech_path,
+            "music": music_path,
+            "speech_ratio": speech_result["speech_ratio"],
+            "segments": speech_result["segments"],
+            "total_duration": speech_result["total_duration"],
+            "speech_duration": speech_result["speech_duration"],
+        }
+
+    except Exception as e:
+        print(f"Speech detection failed: {e}")
+        # Fallback: return music lane only, use it for both
+        return {
+            "speech": music_path,  # Use full audio as fallback
+            "music": music_path,
+            "speech_ratio": 1.0,
+            "segments": [],
+            "total_duration": 0.0,
+            "speech_duration": 0.0,
+        }
 
 
 async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
