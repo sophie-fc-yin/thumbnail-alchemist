@@ -65,6 +65,7 @@ async def extract_audio_from_video(
     # Extract audio using ffmpeg streaming
     # -t limits duration to max_duration_seconds
     # -vn removes video stream (audio only)
+    # -af loudnorm normalizes audio volume for consistent transcription
     # -acodec pcm_s16le for WAV format (16-bit PCM)
     # -ac 1 converts to mono (reduces file size, sufficient for speech)
     # -ar 16000 sets sample rate to 16kHz (standard for speech recognition)
@@ -78,6 +79,8 @@ async def extract_audio_from_video(
         "-t",
         str(max_duration_seconds),
         "-vn",  # No video
+        "-af",
+        "loudnorm=I=-16:TP=-1.5:LRA=11",  # EBU R128 loudness normalization
         "-acodec",
         "pcm_s16le",  # WAV codec (16-bit PCM)
         "-ac",
