@@ -430,8 +430,8 @@ async def analyze_speech_semantics(
             {
                 "time": change["time"],
                 "type": "style_change",
-                "importance": change["importance"],
-                "source": "prosody",
+                "score": change["importance"],  # Use "score" for unified format
+                "source": "speech",  # Unified source name
                 "metadata": change,
             }
         )
@@ -442,8 +442,8 @@ async def analyze_speech_semantics(
             {
                 "time": moment["time"],
                 "type": moment["type"],
-                "importance": moment["importance"],
-                "source": "narrative",
+                "score": moment["importance"],  # Use "score" for unified format
+                "source": "speech",  # Unified source name
                 "metadata": moment,
             }
         )
