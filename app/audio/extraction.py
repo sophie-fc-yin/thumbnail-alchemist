@@ -11,14 +11,127 @@ import librosa
 import numpy as np
 from openai import OpenAI
 
+from app.audio.speech_detection import detect_speech_in_audio
 from app.models import SourceMedia
-from app.vision_media import MediaValidationError, generate_signed_url
+from app.vision.extraction import MediaValidationError, generate_signed_url
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Audio Extraction
+DEFAULT_MAX_DURATION_SECONDS = 1800  # 30 minutes
+DEFAULT_SAMPLE_RATE = 16000  # 16kHz for speech recognition
+LOUDNORM_I = -16  # Integrated loudness target (LUFS)
+LOUDNORM_TP = -1.5  # True peak (dBTP)
+LOUDNORM_LRA = 11  # Loudness range (LU)
+
+# Transcription
+MAX_TRANSCRIPTION_RETRIES = 3
+INITIAL_RETRY_DELAY = 2.0  # seconds
+TRANSCRIPTION_TIMEOUT = 300.0  # 5 minutes
+
+# Audio Features
+AUDIO_FRAME_LENGTH_SECONDS = 0.1  # 100ms frames
+AUDIO_HOP_LENGTH_SECONDS = 0.05  # 50ms hop (50% overlap)
+PITCH_VARIANCE_WINDOW_SIZE = 20  # ~1 second windows
+
+# Speech Detection
+SPEECH_CONFIDENCE_THRESHOLD = 0.5
+SPEECH_ENERGY_THRESHOLD = 0.03
+SPEECH_PITCH_VARIANCE_THRESHOLD = 5000.0  # typical speech: 100-10000
+
+# Text Importance
+TEXT_IMPORTANCE_CLAIM = 1.0
+TEXT_IMPORTANCE_EMPHASIS = 0.7
+TEXT_IMPORTANCE_NEUTRAL = 0.4
+TEXT_IMPORTANCE_FILLER = 0.1
+TEXT_IMPORTANCE_MIN_CLAIM_WORDS = 10
+
+# Emphasis Score
+EMPHASIS_WINDOW_SECONDS = 5.0  # Window for rolling baseline
+EMPHASIS_MIN_STD = 1e-6  # Avoid division by zero
+
+# BGM Penalty
+BGM_MAX_VARIANCE = 0.05  # Threshold for max penalty
+BGM_MIN_PENALTY = 0.2  # Minimum penalty multiplier
+BGM_MAX_PENALTY = 1.0  # Maximum penalty multiplier
+
+# Timeline Events
+SILENCE_THRESHOLD = 0.02  # Energy threshold for silence
+MIN_PAUSE_DURATION = 1.0  # Only track pauses > 1 second
+ENERGY_PEAK_PERCENTILE = 90  # Top 10% energy
+ENERGY_PEAK_WINDOW_SIZE = 20  # ~1 second window
+ENERGY_PEAK_MIN_SPACING = 2.0  # Minimum spacing between peaks (seconds)
+
+# Music Detection
+MUSIC_ENERGY_THRESHOLD = 0.1
+MUSIC_SCORE_THRESHOLD = 0.5
+MUSIC_MIN_DURATION = 3.0  # Minimum 3 seconds
+
+# Default Keyword Lists
+DEFAULT_CLAIM_KEYWORDS = [
+    "discovered",
+    "revealed",
+    "found",
+    "proved",
+    "demonstrated",
+    "breakthrough",
+    "amazing",
+    "incredible",
+    "shocking",
+    "secret",
+    "truth",
+    "fact",
+    "evidence",
+    "research shows",
+    "study found",
+    "this is",
+    "here's why",
+    "the reason",
+    "turns out",
+]
+
+DEFAULT_EMPHASIS_KEYWORDS = [
+    "but",
+    "however",
+    "although",
+    "instead",
+    "actually",
+    "important",
+    "key",
+    "crucial",
+    "critical",
+    "essential",
+    "remember",
+    "note",
+    "pay attention",
+    "listen",
+    "focus",
+    "versus",
+    "compared to",
+    "unlike",
+    "difference",
+]
+
+DEFAULT_FILLER_KEYWORDS = [
+    "um",
+    "uh",
+    "like",
+    "you know",
+    "i mean",
+    "sort of",
+    "kind of",
+    "basically",
+    "literally",
+    "just",
+]
 
 
 async def extract_audio_from_video(
     content_sources: SourceMedia,
     project_id: str,
-    max_duration_seconds: int = 1800,
+    max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
     output_dir: Path | None = None,
     ffmpeg_binary: str | None = None,
 ) -> dict[str, Path] | None:
@@ -81,7 +194,7 @@ async def extract_audio_from_video(
     # -af loudnorm normalizes audio volume for consistent analysis
     # -acodec pcm_s16le for WAV format (16-bit PCM)
     # -ac 1 converts to mono (reduces file size, sufficient for analysis)
-    # -ar 16000 sets sample rate to 16kHz (standard for VAD)
+    # -ar sets sample rate (standard for VAD)
     process = await asyncio.create_subprocess_exec(
         ffmpeg_path,
         "-hide_banner",
@@ -93,13 +206,13 @@ async def extract_audio_from_video(
         str(max_duration_seconds),
         "-vn",  # No video
         "-af",
-        "loudnorm=I=-16:TP=-1.5:LRA=11",  # EBU R128 loudness normalization
+        f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}",  # EBU R128 loudness normalization
         "-acodec",
         "pcm_s16le",  # WAV codec (16-bit PCM)
         "-ac",
         "1",  # Mono
         "-ar",
-        "16000",  # 16kHz sample rate (required for Silero VAD)
+        str(DEFAULT_SAMPLE_RATE),  # Sample rate (required for Silero VAD)
         str(full_audio_path),
         "-y",  # Overwrite output file
         stdout=asyncio.subprocess.DEVNULL,
@@ -117,8 +230,6 @@ async def extract_audio_from_video(
         return None
 
     # STEP 2: Detect speech segments and create speech-only lane
-    from app.speech_detection import detect_speech_in_audio
-
     try:
         speech_result = detect_speech_in_audio(
             audio_path=full_audio_path,
@@ -165,11 +276,11 @@ async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
         Dictionary with frame-by-frame audio features
     """
     # Load audio
-    y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+    y, sr = librosa.load(str(audio_path), sr=DEFAULT_SAMPLE_RATE, mono=True)
 
     # Frame parameters (analyze in small windows)
-    frame_length = int(0.1 * sr)  # 100ms frames
-    hop_length = int(0.05 * sr)  # 50ms hop (50% overlap)
+    frame_length = int(AUDIO_FRAME_LENGTH_SECONDS * sr)
+    hop_length = int(AUDIO_HOP_LENGTH_SECONDS * sr)
 
     # Extract features
     # Pitch (fundamental frequency)
@@ -200,11 +311,10 @@ async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
     times = librosa.frames_to_time(range(len(rms)), sr=sr, hop_length=hop_length)
 
     # Calculate pitch variance (in windows)
-    window_size = 20  # ~1 second windows
     pitch_variance = []
     for i in range(len(pitch_values)):
-        start = max(0, i - window_size // 2)
-        end = min(len(pitch_values), i + window_size // 2)
+        start = max(0, i - PITCH_VARIANCE_WINDOW_SIZE // 2)
+        end = min(len(pitch_values), i + PITCH_VARIANCE_WINDOW_SIZE // 2)
         window_pitches = [p for p in pitch_values[start:end] if p > 0]
         variance = float(np.var(window_pitches)) if window_pitches else 0.0
         pitch_variance.append(variance)
@@ -293,15 +403,14 @@ async def transcribe_and_analyze_audio(
     try:
         client = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
-            timeout=300.0,  # 5 minutes for large audio files
+            timeout=TRANSCRIPTION_TIMEOUT,
         )
 
         # STEP 1: GPT-4o Transcribe Diarize - Transcription + Speaker Diarization
         # Retry logic for network issues
-        max_retries = 3
-        retry_delay = 2.0
+        retry_delay = INITIAL_RETRY_DELAY
 
-        for attempt in range(max_retries):
+        for attempt in range(MAX_TRANSCRIPTION_RETRIES):
             try:
                 with open(audio_path, "rb") as audio_file:
                     transcription = client.audio.transcriptions.create(
@@ -313,7 +422,7 @@ async def transcribe_and_analyze_audio(
                     )
                 break  # Success, exit retry loop
             except Exception as e:
-                if attempt < max_retries - 1:
+                if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
                     print(
                         f"Transcription attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s..."
                     )
@@ -382,17 +491,16 @@ async def transcribe_and_analyze_audio(
                     )
                 prev_speaker = current_speaker
 
-        # Add SIGNIFICANT pauses only (> 1 second)
-        silence_threshold = 0.02
+        # Add SIGNIFICANT pauses only (> MIN_PAUSE_DURATION)
         in_silence = False
         silence_start = 0.0
 
         for time, energy in zip(audio_features["times"], audio_features["energy"]):
-            if energy < silence_threshold and not in_silence:
+            if energy < SILENCE_THRESHOLD and not in_silence:
                 silence_start = time
                 in_silence = True
-            elif energy >= silence_threshold and in_silence:
-                if time - silence_start > 1.0:  # Only significant pauses
+            elif energy >= SILENCE_THRESHOLD and in_silence:
+                if time - silence_start > MIN_PAUSE_DURATION:  # Only significant pauses
                     timeline.append(
                         {
                             "type": "pause",
@@ -541,35 +649,37 @@ def _get_segment_features(start: float, end: float, audio_features: dict) -> dic
     }
 
 
-def _detect_energy_peaks(audio_features: dict, threshold_percentile: float = 90) -> list[dict]:
+def _detect_energy_peaks(
+    audio_features: dict,
+    threshold_percentile: float = ENERGY_PEAK_PERCENTILE,
+) -> list[dict]:
     """
     Detect energy peaks (high-energy moments) in audio.
 
     Args:
         audio_features: Audio features dict
-        threshold_percentile: Energy percentile to consider as peak (default: 90)
+        threshold_percentile: Energy percentile to consider as peak
 
     Returns:
         List of energy peak events
     """
-    import numpy as np
-
     energies = np.array(audio_features["energy"])
     times = audio_features["times"]
 
-    # Calculate threshold (top 10% by default)
+    # Calculate threshold
     threshold = np.percentile(energies, threshold_percentile)
 
     # Find peaks (local maxima above threshold)
     peaks = []
-    window_size = 20  # ~1 second window
 
-    for i in range(window_size, len(energies) - window_size):
+    for i in range(ENERGY_PEAK_WINDOW_SIZE, len(energies) - ENERGY_PEAK_WINDOW_SIZE):
         if energies[i] > threshold:
             # Check if it's a local maximum
-            if energies[i] == max(energies[i - window_size : i + window_size]):
+            if energies[i] == max(
+                energies[i - ENERGY_PEAK_WINDOW_SIZE : i + ENERGY_PEAK_WINDOW_SIZE]
+            ):
                 # Avoid duplicate peaks too close together
-                if not peaks or (times[i] - peaks[-1]["time"]) > 2.0:
+                if not peaks or (times[i] - peaks[-1]["time"]) > ENERGY_PEAK_MIN_SPACING:
                     peaks.append(
                         {
                             "time": times[i],
@@ -580,7 +690,10 @@ def _detect_energy_peaks(audio_features: dict, threshold_percentile: float = 90)
     return peaks
 
 
-def _detect_music_sections(audio_features: dict, energy_threshold: float = 0.1) -> list[dict]:
+def _detect_music_sections(
+    audio_features: dict,
+    energy_threshold: float = MUSIC_ENERGY_THRESHOLD,
+) -> list[dict]:
     """
     Detect sections with background music.
 
@@ -593,8 +706,6 @@ def _detect_music_sections(audio_features: dict, energy_threshold: float = 0.1) 
     Returns:
         List of music section events
     """
-    import numpy as np
-
     times = audio_features["times"]
     energies = np.array(audio_features["energy"])
     brightness = np.array(audio_features["spectral_brightness"])
@@ -611,15 +722,12 @@ def _detect_music_sections(audio_features: dict, energy_threshold: float = 0.1) 
     in_section = False
     section_start = 0.0
 
-    threshold = 0.5
-    min_duration = 3.0  # Minimum 3 seconds
-
     for time, score in zip(times, music_score):
-        if score > threshold and not in_section:
+        if score > MUSIC_SCORE_THRESHOLD and not in_section:
             section_start = time
             in_section = True
-        elif score <= threshold and in_section:
-            if time - section_start > min_duration:
+        elif score <= MUSIC_SCORE_THRESHOLD and in_section:
+            if time - section_start > MUSIC_MIN_DURATION:
                 # Calculate average intensity for this section
                 section_indices = [j for j, t in enumerate(times) if section_start <= t <= time]
                 avg_intensity = float(np.mean([energies[j] for j in section_indices]))
@@ -643,7 +751,7 @@ def _detect_music_sections(audio_features: dict, energy_threshold: float = 0.1) 
 
 def calculate_speech_gate(
     segment: dict,
-    speech_confidence_threshold: float = 0.5,
+    speech_confidence_threshold: float = SPEECH_CONFIDENCE_THRESHOLD,
 ) -> float:
     """
     Calculate speech gate: binary gate based on speech confidence.
@@ -710,100 +818,49 @@ def calculate_text_importance(
     text = segment.get("text", "").strip()
 
     if not text:
-        return 0.1  # Empty text = filler
+        return TEXT_IMPORTANCE_FILLER  # Empty text = filler
 
     text_lower = text.lower()
 
-    # Default keyword lists
+    # Use default keyword lists if not provided
     if claim_keywords is None:
-        claim_keywords = [
-            "discovered",
-            "revealed",
-            "found",
-            "proved",
-            "demonstrated",
-            "breakthrough",
-            "amazing",
-            "incredible",
-            "shocking",
-            "secret",
-            "truth",
-            "fact",
-            "evidence",
-            "research shows",
-            "study found",
-            "this is",
-            "here's why",
-            "the reason",
-            "turns out",
-        ]
+        claim_keywords = DEFAULT_CLAIM_KEYWORDS
 
     if emphasis_keywords is None:
-        emphasis_keywords = [
-            "but",
-            "however",
-            "although",
-            "instead",
-            "actually",
-            "important",
-            "key",
-            "crucial",
-            "critical",
-            "essential",
-            "remember",
-            "note",
-            "pay attention",
-            "listen",
-            "focus",
-            "versus",
-            "compared to",
-            "unlike",
-            "difference",
-        ]
+        emphasis_keywords = DEFAULT_EMPHASIS_KEYWORDS
 
     if filler_keywords is None:
-        filler_keywords = [
-            "um",
-            "uh",
-            "like",
-            "you know",
-            "i mean",
-            "sort of",
-            "kind of",
-            "basically",
-            "literally",
-            "just",
-        ]
+        filler_keywords = DEFAULT_FILLER_KEYWORDS
 
     # Check for strong claims/reveals (highest priority)
     has_claim = any(kw in text_lower for kw in claim_keywords)
     has_reveal_markers = any(marker in text for marker in ["!", "?", "...", "—"])
 
-    if has_claim or (has_reveal_markers and len(text.split()) > 10):
-        return 1.0  # Strong claim / reveal
+    if has_claim or (has_reveal_markers and len(text.split()) > TEXT_IMPORTANCE_MIN_CLAIM_WORDS):
+        return TEXT_IMPORTANCE_CLAIM
 
     # Check for emphasis/contrast
     has_emphasis = any(kw in text_lower for kw in emphasis_keywords)
     has_caps = any(word.isupper() and len(word) > 2 for word in text.split())
 
     if has_emphasis or has_caps:
-        return 0.7  # Emphasis / contrast
+        return TEXT_IMPORTANCE_EMPHASIS
 
     # Check for filler
     has_filler = any(kw in text_lower for kw in filler_keywords)
     is_short = len(text.split()) < 5
 
     if has_filler or is_short:
-        return 0.1  # Filler
+        return TEXT_IMPORTANCE_FILLER
 
     # Default: neutral explanation
-    return 0.4
+    return TEXT_IMPORTANCE_NEUTRAL
 
 
 def calculate_emphasis_score(
     segment: dict,
     audio_features: dict,
-    window_seconds: float = 5.0,
+    window_seconds: float = EMPHASIS_WINDOW_SECONDS,
 ) -> float:
     """
     Calculate emphasis score using local energy deviation from rolling baseline.
@@ -859,8 +916,8 @@ def calculate_emphasis_score(
         rolling_std = float(np.std(window_energies))
 
     # Avoid division by zero
-    if rolling_std < 1e-6:
-        rolling_std = 1e-6
+    if rolling_std < EMPHASIS_MIN_STD:
+        rolling_std = EMPHASIS_MIN_STD
 
     # Calculate normalized deviation
     emphasis = (local_energy - rolling_baseline) / rolling_std
@@ -913,14 +970,13 @@ def calculate_bgm_penalty(
     # Normalize variance to [0, 1] using typical ranges
     # Typical speech: variance ~ 0.001-0.01
     # Music: variance ~ 0.01-0.1+
-    max_variance = 0.05  # Threshold for max penalty
-    energy_variance_normalized = min(energy_variance / max_variance, 1.0)
+    energy_variance_normalized = min(energy_variance / BGM_MAX_VARIANCE, 1.0)
 
     # Calculate penalty
     penalty = 1.0 - energy_variance_normalized
 
-    # Clamp to [0.2, 1.0]
-    return max(0.2, min(penalty, 1.0))
+    # Clamp to [BGM_MIN_PENALTY, BGM_MAX_PENALTY]
+    return max(BGM_MIN_PENALTY, min(penalty, BGM_MAX_PENALTY))
 
 
 def calculate_audio_score(

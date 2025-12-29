@@ -8,6 +8,39 @@ from typing import Any
 
 import numpy as np
 
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Pace Score Weights
+DEFAULT_WEIGHT_EXPRESSION = 0.25  # Visual emotion (key for thumbnails)
+DEFAULT_WEIGHT_LANDMARK = 0.15  # Head movement, gestures
+DEFAULT_WEIGHT_AUDIO = 0.2  # Music, excitement
+DEFAULT_WEIGHT_SPEECH = 0.15  # Vocal emphasis
+DEFAULT_WEIGHT_AUDIO_SCORE = 0.25  # Comprehensive audio analysis
+
+# Pace Categorization Thresholds
+PACE_LOW_THRESHOLD = 0.3  # Below this = low pace
+PACE_MEDIUM_THRESHOLD = 0.7  # Below this = medium pace, above = high pace
+
+# Sampling Intervals (seconds)
+DEFAULT_MIN_INTERVAL = 0.1  # Minimum sampling interval (high pace)
+DEFAULT_MAX_INTERVAL = 2.0  # Maximum sampling interval (low pace)
+LOW_PACE_MIN_INTERVAL = 1.5  # Low pace minimum interval
+LOW_PACE_MAX_INTERVAL = 2.0  # Low pace maximum interval
+MEDIUM_PACE_MIN_INTERVAL = 0.5  # Medium pace minimum interval
+MEDIUM_PACE_MAX_INTERVAL = 1.5  # Medium pace maximum interval
+HIGH_PACE_MAX_INTERVAL = 0.5  # High pace maximum interval
+
+# Segmentation
+DEFAULT_SEGMENTATION_THRESHOLD = 0.2  # Pace change threshold
+
+# Signal Processing
+DEFAULT_SMOOTHING_WINDOW_SIZE = 5  # Window size for moving average
+
+# Time Conversion
+MS_TO_SECONDS = 1000.0  # Milliseconds to seconds conversion factor
+
 
 def calculate_pace_score(
     expression_delta: float = 0.0,

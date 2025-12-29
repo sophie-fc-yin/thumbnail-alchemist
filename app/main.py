@@ -7,8 +7,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.adaptive_sampling import orchestrate_adaptive_sampling
-from app.audio_media import extract_audio_from_video, transcribe_and_analyze_audio
+from app.analysis.adaptive_sampling import orchestrate_adaptive_sampling
+from app.audio.extraction import extract_audio_from_video, transcribe_and_analyze_audio
 from app.models import (
     AdaptiveSamplingResponse,
     AudioBreakdownRequest,
@@ -30,14 +30,14 @@ from app.models import (
     VisionBreakdownRequest,
     VisionBreakdownResponse,
 )
-from app.storage import (
+from app.utils.storage import (
     StorageError,
     generate_signed_download_url,
     generate_signed_upload_url,
     upload_file_to_gcs,
 )
-from app.vision_media import extract_candidate_frames, validate_and_load_content
-from app.vision_stack import analyze_frame_quality, rank_frames
+from app.vision.extraction import extract_candidate_frames, validate_and_load_content
+from app.vision.stack import analyze_frame_quality, rank_frames
 
 app = FastAPI(title="Thumbnail Alchemist API", version="0.1.0")
 
@@ -234,7 +234,7 @@ async def breakdown_vision(payload: VisionBreakdownRequest) -> VisionBreakdownRe
 
     ffprobe_path = shutil.which("ffprobe")
     if ffprobe_path:
-        from app.vision_media import generate_signed_url
+        from app.vision.extraction import generate_signed_url
 
         video_url = generate_signed_url(payload.video_path)
 

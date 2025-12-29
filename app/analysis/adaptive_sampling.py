@@ -11,28 +11,70 @@ Coordinates the full pipeline:
 This module orchestrates the order of operations and manages data flow.
 """
 
+import asyncio
+import shutil
 import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from google.cloud import storage
 
-from app.audio_media import extract_audio_from_video, transcribe_and_analyze_audio
-from app.face_analysis import FaceExpressionAnalyzer, calculate_landmark_motion
-from app.models import SourceMedia
-from app.pace_analysis import (
+from app.analysis.output import (
+    build_comprehensive_analysis_json,
+    merge_stream_timelines,
+    save_analysis_json_to_gcs,
+)
+from app.analysis.pace_analysis import (
     calculate_audio_energy_delta,
     calculate_pace_score,
     calculate_speech_emotion_delta,
     pace_to_sampling_interval,
     segment_video_by_pace,
 )
+from app.audio.extraction import (
+    analyze_audio_features,
+    extract_audio_from_video,
+    transcribe_and_analyze_audio,
+)
+from app.audio.saliency import detect_audio_saliency
+from app.audio.speech_semantics import analyze_speech_semantics
+from app.models import SourceMedia
+from app.vision.extraction import generate_signed_url
+from app.vision.face_analysis import FaceExpressionAnalyzer, calculate_landmark_motion
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+# Pipeline Configuration
+DEFAULT_MAX_FRAMES = 100
+DEFAULT_MAX_DURATION_SECONDS = 1800  # 30 minutes
+INITIAL_SAMPLE_RATIO = 5  # Sample 1/5 of max frames initially (min 20)
+PACE_SEGMENTATION_THRESHOLD = 0.2  # Pace change threshold for segmentation
+
+# GCS Buckets
+GCS_TEMP_BUCKET = "clickmoment-prod-temp"
+GCS_ASSETS_BUCKET = "clickmoment-prod-assets"
+
+# Frame Extraction
+DEFAULT_FRAME_INTERVAL_FALLBACK = 2.0  # seconds
+FFMPEG_OUTPUT_PATTERN = "sample_%03d.jpg"
+SEGMENT_FRAME_PATTERN = "frame_%03d.jpg"
+
+# Local Storage Paths
+LOCAL_MEDIA_DIR = "thumbnail-alchemist-media"
+TEMP_DIR_NAME = "temp"
+SAMPLE_FRAMES_DIR = "sample_frames"
+DOWNLOADED_SAMPLES_DIR = "downloaded_samples"
+DERIVED_MEDIA_DIR = "derived-media"
+FRAMES_DIR = "frames"
 
 
 async def orchestrate_adaptive_sampling(
     video_path: str,
     project_id: str,
-    max_frames: int = 100,
+    max_frames: int = DEFAULT_MAX_FRAMES,
     upload_to_gcs: bool = True,
 ) -> dict[str, Any]:
     """
@@ -81,7 +123,7 @@ async def orchestrate_adaptive_sampling(
     audio_result = await extract_audio_from_video(
         content_sources=source_media,
         project_id=project_id,
-        max_duration_seconds=1800,
+        max_duration_seconds=DEFAULT_MAX_DURATION_SECONDS,
     )
 
     if not audio_result:
@@ -116,7 +158,7 @@ async def orchestrate_adaptive_sampling(
 
     # Sample ~20 frames evenly distributed for pace analysis
     # Upload to temp bucket for analysis (not final storage)
-    initial_sample_count = min(20, max_frames // 5)
+    initial_sample_count = min(20, max_frames // INITIAL_SAMPLE_RATIO)
     sample_frames = await _extract_sample_frames_to_temp(
         content_sources=source_media,
         project_id=project_id,
@@ -237,7 +279,7 @@ async def orchestrate_adaptive_sampling(
     pace_segments = segment_video_by_pace(
         pace_scores=pace_scores,
         timestamps=timestamps,
-        threshold=0.2,
+        threshold=PACE_SEGMENTATION_THRESHOLD,
     )
 
     stats["pace_calculation_time"] = time.time() - step_start
@@ -302,13 +344,172 @@ async def orchestrate_adaptive_sampling(
     print(f"[Orchestrator] Total processing time: {stats['total_time']:.2f}s")
 
     # ========================================================================
+    # STREAM A + B: Advanced Audio Analysis
+    # ========================================================================
+    print("[Orchestrator] Running Stream A (Speech Semantics) + Stream B (Audio Saliency)...")
+    stream_start = time.time()
+
+    # Stream A: Speech Semantics Analysis
+    stream_a_results = None
+    try:
+        if audio_analysis.get("transcript"):
+            stream_a_results = await analyze_speech_semantics(
+                audio_path=speech_path,
+                transcript=audio_analysis["transcript"],
+                transcript_segments=audio_analysis.get("segments", []),
+                speech_segments=audio_result.get("segments", []),
+                prosody_features={},  # Will be extracted internally
+            )
+            print(
+                f"[Stream A] Complete: {len(stream_a_results.get('importance_timeline', []))} moments"
+            )
+    except Exception as e:
+        print(f"[Stream A] Failed: {e}")
+
+    # Stream B: Audio Saliency Detection
+    stream_b_results = None
+    try:
+        full_audio_path = audio_result.get("full_audio")
+        if full_audio_path:
+            audio_features = analyze_audio_features(full_audio_path)
+            stream_b_results = detect_audio_saliency(
+                audio_features=audio_features,
+                speech_segments=audio_result.get("segments"),
+            )
+            print(
+                f"[Stream B] Complete: {len(stream_b_results.get('saliency_timeline', []))} moments"
+            )
+    except Exception as e:
+        print(f"[Stream B] Failed: {e}")
+
+    stats["stream_analysis_time"] = time.time() - stream_start
+
+    # ========================================================================
+    # BUILD COMPREHENSIVE ANALYSIS JSON
+    # ========================================================================
+    print("[Orchestrator] Building comprehensive analysis JSON...")
+
+    # Prepare visual analysis with timestamps
+    visual_analysis_with_timestamps = []
+    for i, (frame_path, analysis) in enumerate(zip(local_sample_frames, face_analyses)):
+        timestamp = (i / max(1, len(sample_frames) - 1)) * video_duration
+        visual_analysis_with_timestamps.append(
+            {
+                "timestamp": timestamp,
+                "frame_path": str(frame_path),
+                **analysis,
+            }
+        )
+
+    # Merge timelines
+    stream_a_timeline = stream_a_results.get("importance_timeline", []) if stream_a_results else []
+    stream_b_timeline = stream_b_results.get("saliency_timeline", []) if stream_b_results else []
+
+    merged_timeline = merge_stream_timelines(
+        stream_a_timeline=stream_a_timeline,
+        stream_b_timeline=stream_b_timeline,
+        visual_frames=visual_analysis_with_timestamps,
+        temporal_window=0.5,
+    )
+
+    print(f"[Orchestrator] Merged timeline: {len(merged_timeline)} moment candidates")
+
+    # Build extracted frames metadata
+    extracted_frames_metadata = []
+    for frame_path_str in all_frames:
+        # Extract timestamp from filename (e.g., "frame_5200ms.jpg")
+        try:
+            timestamp_ms = int(Path(frame_path_str).stem.split("_")[1].replace("ms", ""))
+            timestamp_sec = timestamp_ms / 1000.0
+
+            # Find closest moment in merged timeline
+            closest_moment = (
+                min(
+                    merged_timeline,
+                    key=lambda m: abs(m["time"] - timestamp_sec),
+                )
+                if merged_timeline
+                else None
+            )
+
+            # Get segment info
+            segment_info = frame_segment_map.get(frame_path_str, {})
+
+            extracted_frames_metadata.append(
+                {
+                    "timestamp": timestamp_sec,
+                    "frame_path": frame_path_str,
+                    "moment_score": closest_moment["score"] if closest_moment else 0.0,
+                    "pace_score": segment_info.get("pace_score", 0.0),
+                    "pace_category": segment_info.get("pace_category", "unknown"),
+                    "sources": closest_moment["sources"] if closest_moment else [],
+                    "types": closest_moment["types"] if closest_moment else [],
+                }
+            )
+        except (ValueError, IndexError, AttributeError):
+            # Fallback if timestamp parsing fails
+            extracted_frames_metadata.append(
+                {
+                    "timestamp": 0.0,
+                    "frame_path": frame_path_str,
+                    "moment_score": 0.0,
+                    "pace_score": frame_segment_map.get(frame_path_str, {}).get("pace_score", 0.0),
+                    "pace_category": frame_segment_map.get(frame_path_str, {}).get(
+                        "pace_category", "unknown"
+                    ),
+                    "sources": [],
+                    "types": [],
+                }
+            )
+
+    # Build comprehensive analysis JSON
+    comprehensive_analysis = build_comprehensive_analysis_json(
+        project_id=project_id,
+        video_path=video_path,
+        stream_a_results=stream_a_results,
+        stream_b_results=stream_b_results,
+        visual_analysis=visual_analysis_with_timestamps,
+        merged_timeline=merged_timeline,
+        extracted_frames=extracted_frames_metadata,
+        pace_segments=pace_segments,
+        pace_statistics={
+            "avg_pace": float(np.mean([seg["avg_pace"] for seg in pace_segments])),
+            "segment_counts": {
+                "low": sum(1 for s in pace_segments if s["pace_category"] == "low"),
+                "medium": sum(1 for s in pace_segments if s["pace_category"] == "medium"),
+                "high": sum(1 for s in pace_segments if s["pace_category"] == "high"),
+            },
+            "total_segments": len(pace_segments),
+        },
+        processing_stats=stats,
+        audio_features=audio_features if stream_b_results else None,
+        transcript_data={
+            "transcript": audio_analysis.get("transcript", ""),
+            "segments": audio_analysis.get("segments", []),
+            "duration": audio_analysis.get("duration_seconds", 0.0),
+        }
+        if audio_analysis
+        else None,
+    )
+
+    # Save to GCS
+    try:
+        analysis_json_url = await save_analysis_json_to_gcs(
+            analysis_json=comprehensive_analysis,
+            project_id=project_id,
+            bucket_name=GCS_ASSETS_BUCKET,
+        )
+        print(f"[Orchestrator] Saved comprehensive analysis to: {analysis_json_url}")
+    except Exception as e:
+        print(f"[Orchestrator] Failed to save analysis JSON: {e}")
+        analysis_json_url = None
+
+    # ========================================================================
     # CLEANUP: Delete local temp files
     # ========================================================================
     print("[Orchestrator] Cleaning up local temp files...")
     try:
-        import shutil
-
-        temp_dir = Path("thumbnail-alchemist-media") / "temp" / project_id
+        temp_dir = Path(LOCAL_MEDIA_DIR) / TEMP_DIR_NAME / project_id
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
             print(f"[Orchestrator] Cleaned up {temp_dir}")
@@ -329,16 +530,32 @@ async def orchestrate_adaptive_sampling(
 
     avg_pace = float(np.mean([seg["avg_pace"] for seg in pace_segments]))
 
+    # Enhanced summary with Stream A+B info
+    stream_info = ""
+    if stream_a_results or stream_b_results:
+        stream_a_count = (
+            len(stream_a_results.get("importance_timeline", [])) if stream_a_results else 0
+        )
+        stream_b_count = (
+            len(stream_b_results.get("saliency_timeline", [])) if stream_b_results else 0
+        )
+        stream_info = (
+            f" Stream A: {stream_a_count} moments, Stream B: {stream_b_count} moments, "
+            f"Merged: {len(merged_timeline)} candidates."
+        )
+
     summary = (
         f"Adaptive sampling complete: {len(all_frames)} frames extracted. "
         f"Pace segments: {category_counts['low']} low, "
         f"{category_counts['medium']} medium, "
         f"{category_counts['high']} high. "
         f"Average pace: {avg_pace:.2f}. "
+        f"{stream_info}"
         f"Processing time: {stats['total_time']:.1f}s"
     )
 
     return {
+        "project_id": project_id,
         "frames": [str(f) for f in all_frames],
         "frame_segment_map": frame_segment_map,
         "pace_segments": pace_segments,
@@ -349,6 +566,16 @@ async def orchestrate_adaptive_sampling(
             "segment_counts": category_counts,
             "total_segments": len(pace_segments),
         },
+        # New: Stream A + B results
+        "stream_a_moments": len(stream_a_results.get("importance_timeline", []))
+        if stream_a_results
+        else 0,
+        "stream_b_moments": len(stream_b_results.get("saliency_timeline", []))
+        if stream_b_results
+        else 0,
+        "merged_moment_candidates": len(merged_timeline),
+        # New: Comprehensive analysis JSON URL
+        "analysis_json_url": analysis_json_url,
         "summary": summary,
     }
 
@@ -367,13 +594,11 @@ async def _download_temp_frames(
     Returns:
         List of local file paths
     """
-    from google.cloud import storage
-
     client = storage.Client()
     local_frames = []
 
     # Create local temp directory
-    local_dir = Path("thumbnail-alchemist-media") / "temp" / project_id / "downloaded_samples"
+    local_dir = Path(LOCAL_MEDIA_DIR) / TEMP_DIR_NAME / project_id / DOWNLOADED_SAMPLES_DIR
     local_dir.mkdir(parents=True, exist_ok=True)
 
     for gcs_url in temp_gcs_urls:
@@ -425,13 +650,6 @@ async def _extract_sample_frames_to_temp(
     Returns:
         List of GCS URLs in temp bucket
     """
-    import asyncio
-    import shutil
-
-    from google.cloud import storage
-
-    from app.vision_media import generate_signed_url
-
     video_path = content_sources.video_path
 
     # Setup ffmpeg
@@ -446,11 +664,11 @@ async def _extract_sample_frames_to_temp(
         video_url = video_path
 
     # Create local output directory
-    output_dir = Path("thumbnail-alchemist-media") / "temp" / project_id / "sample_frames"
+    output_dir = Path(LOCAL_MEDIA_DIR) / TEMP_DIR_NAME / project_id / SAMPLE_FRAMES_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Extract frames evenly distributed
-    output_pattern = output_dir / "sample_%03d.jpg"
+    output_pattern = output_dir / FFMPEG_OUTPUT_PATTERN
 
     # Get video duration for adaptive sampling
     ffprobe_path = shutil.which("ffprobe")
@@ -473,9 +691,9 @@ async def _extract_sample_frames_to_temp(
             duration = float(stdout.decode().strip())
             interval = duration / max_frames
         except (ValueError, AttributeError):
-            interval = 2.0  # Fallback
+            interval = DEFAULT_FRAME_INTERVAL_FALLBACK
     else:
-        interval = 2.0
+        interval = DEFAULT_FRAME_INTERVAL_FALLBACK
 
     # Extract frames
     process = await asyncio.create_subprocess_exec(
@@ -498,7 +716,7 @@ async def _extract_sample_frames_to_temp(
     # Upload to TEMP bucket
     try:
         client = storage.Client()
-        bucket = client.bucket("clickmoment-prod-temp")
+        bucket = client.bucket(GCS_TEMP_BUCKET)
 
         temp_urls = []
         for frame_path in local_frames:
@@ -511,7 +729,7 @@ async def _extract_sample_frames_to_temp(
             blob.metadata = {"temp": "true", "project_id": project_id}
             blob.patch()
 
-            temp_url = f"gs://clickmoment-prod-temp/{blob_path}"
+            temp_url = f"gs://{GCS_TEMP_BUCKET}/{blob_path}"
             temp_urls.append(temp_url)
 
             # Delete local file
@@ -550,13 +768,6 @@ async def _extract_frames_for_segment(
     Returns:
         List of frame paths (GCS URLs or local paths)
     """
-    import asyncio
-    import shutil
-
-    from google.cloud import storage
-
-    from app.vision_media import generate_signed_url
-
     # Setup ffmpeg
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
@@ -570,10 +781,10 @@ async def _extract_frames_for_segment(
 
     # Create output directory
     output_dir = (
-        Path("thumbnail-alchemist-media")
-        / "derived-media"
+        Path(LOCAL_MEDIA_DIR)
+        / DERIVED_MEDIA_DIR
         / project_id
-        / "frames"
+        / FRAMES_DIR
         / f"segment_{int(start_time)}_{int(end_time)}"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -583,7 +794,7 @@ async def _extract_frames_for_segment(
     interval = duration / max(1, frame_count)
 
     # Extract frames using ffmpeg with timestamp seek
-    output_pattern = output_dir / "frame_%03d.jpg"
+    output_pattern = output_dir / SEGMENT_FRAME_PATTERN
 
     process = await asyncio.create_subprocess_exec(
         ffmpeg_path,
@@ -619,7 +830,7 @@ async def _extract_frames_for_segment(
         # Upload to GCS
         try:
             client = storage.Client()
-            bucket = client.bucket("clickmoment-prod-assets")
+            bucket = client.bucket(GCS_ASSETS_BUCKET)
 
             gcs_frames = []
             for frame_path in renamed_frames:
@@ -627,7 +838,7 @@ async def _extract_frames_for_segment(
                 blob = bucket.blob(blob_path)
                 blob.upload_from_filename(str(frame_path))
 
-                gcs_url = f"gs://clickmoment-prod-assets/{blob_path}"
+                gcs_url = f"gs://{GCS_ASSETS_BUCKET}/{blob_path}"
                 gcs_frames.append(gcs_url)
 
                 # Delete local file
