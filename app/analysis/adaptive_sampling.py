@@ -289,6 +289,7 @@ async def orchestrate_adaptive_sampling(
         pace_scores=pace_scores,
         timestamps=timestamps,
         threshold=PACE_SEGMENTATION_THRESHOLD,
+        video_duration=video_duration,
     )
 
     stats["pace_calculation_time"] = time.time() - step_start

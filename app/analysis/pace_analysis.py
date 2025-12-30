@@ -141,6 +141,7 @@ def segment_video_by_pace(
     pace_scores: list[float],
     timestamps: list[float],
     threshold: float = 0.2,
+    video_duration: float | None = None,
 ) -> list[dict[str, Any]]:
     """
     Segment video into pace regions.
@@ -152,6 +153,7 @@ def segment_video_by_pace(
         pace_scores: List of pace scores for each time point
         timestamps: Corresponding timestamps in seconds
         threshold: Pace change threshold to trigger new segment
+        video_duration: Total video duration (optional, for proper end time)
 
     Returns:
         List of segments with:
@@ -163,6 +165,23 @@ def segment_video_by_pace(
     if not pace_scores or not timestamps:
         return []
 
+    # Special case: very few samples - create full-duration segment
+    if len(timestamps) <= 2:
+        avg_pace = float(np.mean(pace_scores))
+        end_time = video_duration if video_duration else timestamps[-1]
+        # Ensure minimum duration
+        if end_time <= timestamps[0]:
+            end_time = timestamps[0] + 10.0  # Minimum 10 seconds
+
+        return [
+            {
+                "start_time": timestamps[0],
+                "end_time": end_time,
+                "avg_pace": avg_pace,
+                "pace_category": _categorize_pace(avg_pace),
+            }
+        ]
+
     segments = []
     current_start = timestamps[0]
     current_paces = [pace_scores[0]]
@@ -173,31 +192,37 @@ def segment_video_by_pace(
 
         # Check if pace changed significantly
         if abs(pace - prev_pace) > threshold:
-            # End current segment
+            # End current segment at midpoint between samples
+            midpoint = (timestamps[i - 1] + timestamps[i]) / 2.0
             avg_pace = float(np.mean(current_paces))
             segments.append(
                 {
                     "start_time": current_start,
-                    "end_time": timestamps[i - 1],
+                    "end_time": midpoint,
                     "avg_pace": avg_pace,
                     "pace_category": _categorize_pace(avg_pace),
                 }
             )
 
-            # Start new segment
-            current_start = timestamps[i]
+            # Start new segment at midpoint
+            current_start = midpoint
             current_paces = [pace]
         else:
             # Continue current segment
             current_paces.append(pace)
 
-    # Add final segment
+    # Add final segment - extend to video duration if available
     if current_paces:
         avg_pace = float(np.mean(current_paces))
+        end_time = video_duration if video_duration else timestamps[-1]
+        # Ensure end_time is after start
+        if end_time <= current_start:
+            end_time = current_start + max(10.0, (timestamps[-1] - timestamps[0]) / len(timestamps))
+
         segments.append(
             {
                 "start_time": current_start,
-                "end_time": timestamps[-1],
+                "end_time": end_time,
                 "avg_pace": avg_pace,
                 "pace_category": _categorize_pace(avg_pace),
             }
