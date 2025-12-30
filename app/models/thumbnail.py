@@ -122,21 +122,21 @@ class ThumbnailRequest(BaseModel):
                     ],
                     "target": {
                         "platform": "youtube",
-                        "optimization": "CTR",
-                        "audience_profile": "tech-savvy developers ages 25-40",
+                        "optimization": "subscriber growth",
+                        "audience_profile": "travel enthusiasts and people curious about New Orleans, ages 20-45",
                     },
                     "channel_profile": {
-                        "stage": "growing",
-                        "subscriber_count": 50000,
-                        "content_niche": "coding tutorials",
-                        "upload_frequency": "weekly",
-                        "growth_goal": "build authority",
+                        "stage": "new/starter",
+                        "subscriber_count": 0,
+                        "content_niche": "travel",
+                        "upload_frequency": "as I travel",
+                        "growth_goal": "build community",
                     },
                     "creative_brief": {
-                        "mood": "professional, clean, modern",
-                        "title_hint": "Learn React Hooks in 10 Minutes",
-                        "brand_colors": ["#61DAFB", "#282C34"],
-                        "notes": "Keep it simple and code-focused",
+                        "mood": "casual, authentic, chill with energetic moments",
+                        "title_hint": "Exploring New Orleans for the First Time | What to See & Do",
+                        "brand_colors": [],
+                        "notes": "Genuine reactions, mix of calm sightseeing and fun event moments. Show the real NOLA experience - food, culture, music, and hidden spots.",
                     },
                 }
             ]
