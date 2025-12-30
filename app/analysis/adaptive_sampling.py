@@ -352,6 +352,15 @@ async def orchestrate_adaptive_sampling(
     print(f"[Orchestrator] Adaptive extraction complete: {len(all_frames)} total frames")
     print(f"[Orchestrator] Total processing time: {stats['total_time']:.2f}s")
 
+    # Check if frames were extracted
+    if not all_frames:
+        raise ValueError(
+            f"No frames extracted! "
+            f"Pace segments: {len(pace_segments)}, "
+            f"Sample frames analyzed: {len(sample_frames)}. "
+            f"This could indicate an issue with ffmpeg or video access."
+        )
+
     # ========================================================================
     # STREAM A + B: Advanced Audio Analysis
     # ========================================================================
