@@ -355,95 +355,221 @@ class ThumbnailSelector:
         brief: dict[str, Any],
         profile: dict[str, Any],
     ) -> str:
-        """Build comprehensive prompt for Gemini with all frame scores."""
+        """Build advisory prompt with dual output: creator guidance + debug scores."""
 
-        # Build frame summaries
+        # Build frame summaries with FULL scoring details for analysis
         frame_summaries = []
         for i, frame in enumerate(scored_frames, 1):
-            # Extract editability details
             edit_details = frame.get("editability_details", {})
-            text_space = edit_details.get("text_overlay_space", 0.0)
-            emotion_resilience = edit_details.get("emotion_resilience", 0.0)
 
             summary = f"""
-**Frame {i}** (Timestamp: {frame['timestamp']:.1f}s, Overall Score: {frame['total_score']:.2f})
-- Aesthetic (niche-adjusted): {frame['aesthetic_score']:.2f}
-- Psychology (goal-aligned): {frame['psychology_score']:.2f}
-- Editability (workability): {frame['editability']:.2f}
-  → Text overlay space: {text_space:.2f}
-  → Emotion resilience: {emotion_resilience:.2f}
-- Creator Alignment: {frame['creator_alignment']:.2f}
+**Frame {i}** (Timestamp: {frame['timestamp']:.1f}s)
+SCORES (for internal analysis):
+- Total: {frame['total_score']:.2f}
+- Aesthetic: {frame['aesthetic_score']:.2f}
+- Psychology: {frame['psychology_score']:.2f}
+- Editability: {frame['editability']:.2f} (text space: {edit_details.get('text_overlay_space', 0):.2f}, emotion resilience: {edit_details.get('emotion_resilience', 0):.2f}, crop: {edit_details.get('crop_resilience', 0):.2f})
 - Face Quality: {frame['face_quality']:.2f}
+- Creator Alignment: {frame['creator_alignment']:.2f}
+FEATURES:
 - Emotion: {frame['emotion']} (intensity: {frame['expression_intensity']:.2f})
-- Detected Triggers: {', '.join(frame['detected_triggers'][:4]) if frame['detected_triggers'] else 'none'}
+- Triggers: {', '.join(frame['detected_triggers'][:4]) if frame['detected_triggers'] else 'none'}
 """
             frame_summaries.append(summary)
 
-        prompt = f"""You are a YouTube thumbnail optimization expert with deep knowledge of viewer psychology and creator branding.
+        prompt = f"""You are a Thumbnail Risk Advisor. Provide decision relief for creators, NOT a single "best" answer.
 
-I've analyzed {len(scored_frames)} frames using specialized models with niche-specific criteria. Each frame has quantitative scores that are already optimized for this channel's niche and goals. Now I need your creative judgment to select the BEST frame.
+## HOW TO USE SCORES
+- USE scores internally to determine which frames fit each category
+- High total scores + balanced components = likely SAFE
+- High psychology/aesthetic but lower editability = potential HIGH-VARIANCE
+- Low emotion resilience, pre-emotion, or low editability = potential AVOID
+- BUT always verify visually - scores guide, images decide
 
-## Creator Context
+## PROHIBITIONS (for creator-facing output only)
+- DO NOT mention numeric scores, ranks, or "#1" in the creator-facing fields (safe/high_variance/avoid)
+- DO NOT use "rank," "score," "winner," or "optimal" in one_liner/reasons
+- DO NOT predict CTR or performance metrics
+- DO include all scores in the debug section for developer analysis
+
+## YOUR TASK
+Provide THREE strategic options (safe/high-variance/avoid) + full debug data with scores.
 
 **Video Title**: "{brief.get('video_title', 'Untitled')}"
 **Primary Message**: "{brief.get('primary_message', 'Not specified')}"
 **Target Emotion**: {brief.get('target_emotion', 'Not specified')}
-**Primary Goal**: {brief.get('primary_goal', 'maximize_ctr')} (maximize CTR, grow subscribers, or brand building)
+**Primary Goal**: {brief.get('primary_goal', 'maximize_ctr')}
 
-**Channel Profile**:
-- Niche: {profile.get('niche', 'general')}
-- Personality: {profile.get('personality', 'Not specified')}
-- Tone: {brief.get('tone', 'professional')}
-- Visual Style: {profile.get('visual_style', 'Not specified')}
+**Channel Niche**: {profile.get('niche', 'general')} | {brief.get('tone', 'professional')} tone
 
-**Important Context**:
-- Aesthetic scores are adjusted for {profile.get('niche', 'general')} niche standards
-- Psychology scores prioritize {brief.get('primary_goal', 'CTR')} triggers
-- All scores use niche-specific weights
+**What This Niche Expects**:
+{self._get_niche_context(profile.get('niche', 'general'))}
 
 ## Frame Analysis
 
 {''.join(frame_summaries)}
 
-## Your Task
+## Strategic Options to Provide
 
-Analyze ALL {len(scored_frames)} frames visually alongside their quantitative scores. Select the BEST frame for this specific video.
+### 1. SAFE / DEFENSIBLE
+Low-regret choice. Clear emotion visible at a glance. Works even without perfect title sync.
+**Look for**: Clear focal point, strong readable emotion, good text space, NOT pre-emotion/mid-speech.
 
-**Consider**:
-1. **Title/Thumbnail Synergy**: Does it complement "{brief.get('video_title')}"?
-2. **Niche Fit**: Does it match {profile.get('niche')} aesthetic standards?
-3. **Goal Alignment**: Will it maximize {brief.get('primary_goal')}?
-4. **Editability (CRITICAL)**: Can this frame survive cropping, zooming, and text overlays while maintaining emotional impact? Is there space for title text? Will the emotion remain clear after edits?
-5. **Visual + Data**: Do your visual observations confirm or contradict the scores?
-6. **Psychological Impact**: What emotions/triggers will drive clicks?
-7. **Brand Consistency**: Does it fit the creator's personality?
-8. **Uniqueness**: Will it stand out in search results and recommended feeds?
+### 2. HIGH-VARIANCE / BOLD
+Standout potential with creative risk. Could significantly outperform in the right context.
+**Look for**: Extreme expression, unusual composition, polarizing emotion, needs title to work.
 
-**Important**: The quantitative scores are already niche-optimized, but trust your visual judgment if you see something the models missed.
+### 3. AVOID / COMMON PITFALL
+Tempting but often underperforms. Help creator dodge mistakes.
+**Pitfalls**: Pre-emotion (about to react), mid-speech (awkward mouth), clutter, unclear expression, face too small/dark, no text space.
 
-Return your analysis in this exact JSON format:
+## Output Format (STRICT JSON)
+
+Return EXACTLY this structure:
+
 {{
-  "selected_frame": <number 1 to {len(scored_frames)}>,
-  "confidence": <0.0 to 1.0>,
-  "reasoning": {{
-    "summary": "1-2 sentences explaining why this frame is THE best choice overall",
-    "visual_analysis": "Detailed explanation of what you see in the image that makes it work (facial expression, composition, lighting, etc.)",
-    "editability_assessment": "CRITICAL: How well can this frame survive cropping, zooming, text overlays? Where can creators add title text? Will emotion remain clear after edits?",
-    "score_alignment": "How your visual assessment aligns with or diverges from the quantitative scores",
-    "niche_fit": "Why this frame specifically works for the {profile.get('niche', 'general')} niche",
-    "goal_optimization": "How this frame will help achieve the {brief.get('primary_goal', 'goal')} goal",
-    "psychology_triggers": "Which psychological triggers this frame activates and why they'll drive clicks"
+  "safe": {{
+    "frame_id": "Frame X",
+    "timestamp": "X.Xs",
+    "one_liner": "MAX 18 WORDS - why this is safe/defensible",
+    "reasons": [
+      "EXACTLY 2 bullets in plain English",
+      "Specific visual details, no jargon"
+    ],
+    "risk_notes": ["Optional: 0-2 minor considerations"]
   }},
-  "key_strengths": ["strength1", "strength2", "strength3", "strength4"],
-  "comparative_analysis": {{
-    "runner_up": "Which frame was second choice and why it fell short",
-    "score_vs_visual": "If the highest-scoring frame wasn't selected, explain why visual judgment overrode the score",
-    "weaknesses_avoided": "What weaknesses in other frames this selection avoids"
+  "high_variance": {{
+    "frame_id": "Frame Y",
+    "timestamp": "Y.Ys",
+    "one_liner": "MAX 18 WORDS - the bold potential",
+    "reasons": [
+      "What makes this different",
+      "Why it could outperform"
+    ],
+    "risk_notes": [
+      "What could go wrong",
+      "When this might not work"
+    ]
   }},
-  "creator_message": "2-3 sentences explaining to the creator why this frame will help achieve their {brief.get('primary_goal', 'goal')}, what makes it stand out, and any suggestions for text overlay placement"
-}}"""
+  "avoid": {{
+    "frame_id": "Frame Z",
+    "timestamp": "Z.Zs",
+    "one_liner": "MAX 18 WORDS - the pitfall",
+    "reasons": [
+      "Specific problem (pre-emotion, mid-speech, etc.)",
+      "Why viewers might scroll past"
+    ],
+    "risk_notes": ["Could work only if..."]
+  }},
+  "meta": {{
+    "confidence": "low|medium|high",
+    "what_changed": "Brief note on strategic differences between these three",
+    "user_control_note": "Supportive reminder that creator decides"
+  }},
+  "debug": {{
+    "all_frames_scored": [
+      {{
+        "frame_id": "Frame 1",
+        "timestamp": "X.Xs",
+        "total_score": 0.XX,
+        "aesthetic": 0.XX,
+        "psychology": 0.XX,
+        "editability": 0.XX,
+        "face_quality": 0.XX,
+        "creator_alignment": 0.XX,
+        "emotion": "emotion_name",
+        "expression_intensity": 0.XX,
+        "triggers": ["list", "of", "triggers"],
+        "why_chosen_or_not": "Brief technical note"
+      }}
+    ],
+    "scoring_notes": "Brief explanation of how scores influenced your choices"
+  }}
+}}
+
+## Rules
+1. **one_liner**: MAX 18 words
+2. **reasons**: EXACTLY 2 bullets per category
+3. **risk_notes**: 0-2 bullets (optional)
+4. **Tone**: Supportive advisor, not judge. Reduce doubt, build confidence.
+5. **Language**: Plain English, no jargon.
+6. **Similar frames**: Pick most representative for each strategy anyway.
+7. **No strong avoid**: Choose most tempting-but-risky and explain why.
+
+CRITICAL: Base analysis on VISUAL assessment of actual images, not just score data."""
 
         return prompt
+
+    def _get_niche_context(self, niche: str) -> str:
+        """Provide niche-specific context for Gemini's understanding."""
+
+        # Map niche variations to standard categories
+        niche_lower = niche.lower()
+
+        niche_contexts = {
+            "gaming": """
+- Thumbnails need BOLD colors (saturated, neon, RGB), dramatic lighting, high energy
+- Extreme expressions work well (intense reactions, peak emotion moments)
+- Action-focused composition beats static poses
+- Text overlays are heavy - need excellent text space (scored 20% for editability)
+- SAFE = clear intense emotion + visible game elements
+- BOLD = peak excitement/triumph moment, extreme angle
+- AVOID = low energy, passive expression, unclear what game is about""",
+            "tech": """
+- Clarity is critical - sharp focus, readable details, product visible
+- Bright, even lighting preferred over artistic/moody
+- Need excellent text space for explanatory overlays (scored 18% for editability)
+- Curiosity triggers matter most (raised eyebrows, pointing, "what is this?")
+- SAFE = clear product + neutral-to-surprised expression + text space
+- BOLD = extreme surprise/skepticism at tech result
+- AVOID = product obscured, unclear expression, pre-emotion""",
+            "beauty": """
+- Soft lighting, warm tones, polished/aspirational aesthetic
+- Emotion should inspire (confidence, joy, transformation)
+- Less reliance on text overlays - visual beauty dominates (editability 13%)
+- Authenticity matters - genuine smile beats forced expression
+- SAFE = soft lighting + warm tones + genuine positive emotion
+- BOLD = dramatic transformation moment, unique style
+- AVOID = harsh lighting, unflattering angle, forced expression""",
+            "commentary": """
+- Authenticity is key - raw, genuine reactions valued
+- Face-focused, intimate framing works best
+- Expression should match the take (skeptical, frustrated, intrigued)
+- Moderate text overlay needs (editability 14%)
+- SAFE = clear direct-to-camera expression, readable emotion
+- BOLD = strong opinion expression (raised eyebrow, knowing look)
+- AVOID = ambiguous expression, looking away from camera""",
+            "cooking": """
+- Warm, appetizing lighting required (not cool/fluorescent)
+- Food must be visible and look delicious
+- Moderate text needs for recipe callouts (editability 16%)
+- Overhead or close-up angles preferred
+- SAFE = appetizing dish clearly visible + warm lighting
+- BOLD = dramatic plating, unique presentation, chef's reaction
+- AVOID = unappetizing lighting, food obscured, gray tones""",
+            "educational": """
+- Clarity and authority signals important
+- Bright, even lighting for professional look
+- Heavy text overlay needs for topic/value prop (editability 18%)
+- Curiosity gap matters most for clicks
+- SAFE = confident expression + clear topic signal + text space
+- BOLD = surprising fact moment, myth-busting expression
+- AVOID = uncertain expression, cluttered background, unclear topic""",
+        }
+
+        # Find matching niche context
+        for key in niche_contexts:
+            if key in niche_lower:
+                return niche_contexts[key]
+
+        # Default/general guidance
+        return """
+- Balance between clarity (immediately understandable) and intrigue
+- Text overlay space matters for most niches
+- Emotion should be readable at thumbnail size
+- SAFE = clear emotion + good composition + text space
+- BOLD = extreme or unusual expression with strong visual hook
+- AVOID = ambiguous emotion, cluttered composition, pre-emotion timing"""
 
     def _extract_frame_features(
         self, frame: dict[str, Any], visual_analysis: dict[str, Any]

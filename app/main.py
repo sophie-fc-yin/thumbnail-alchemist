@@ -323,6 +323,39 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     if not extracted_frames:
         raise ValueError("No frames found in adaptive sampling analysis")
 
+    # Transform extracted_frames to ThumbnailSelector format
+    visual_analysis_frames = analysis_data.get("visual_analysis", {}).get("sample_frames", [])
+
+    # Enrich extracted_frames with required fields
+    enriched_frames = []
+    for idx, frame in enumerate(extracted_frames, 1):
+        timestamp = frame.get("timestamp", 0.0)
+
+        # Get matching visual analysis (find closest)
+        closest_visual = (
+            min(
+                visual_analysis_frames,
+                key=lambda v: abs(v.get("timestamp", 0) - timestamp),
+                default={},
+            )
+            if visual_analysis_frames
+            else {}
+        )
+
+        enriched_frames.append(
+            {
+                "frame_number": idx,
+                "path": frame.get("frame_path", ""),
+                "url": frame.get("frame_path", ""),  # Same as path for GCS
+                "timestamp": timestamp,
+                "moment_score": frame.get("moment_score", 0.0),
+                "pace_score": frame.get("pace_score", 0.0),
+                "visual_analysis": closest_visual.get("face_analysis", {}),
+            }
+        )
+
+    extracted_frames = enriched_frames
+
     # ========================================================================
     # STEP 2: Map request data to thumbnail selector format
     # ========================================================================

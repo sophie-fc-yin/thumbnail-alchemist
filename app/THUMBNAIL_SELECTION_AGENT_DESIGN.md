@@ -2,8 +2,8 @@
 
 **Purpose**: Intelligent agent that analyzes adaptive sampling results and creator preferences to select the optimal thumbnail frame that maximizes engagement and achieves creator goals.
 
-**Version**: 1.0
-**Last Updated**: 2025-01-28
+**Version**: 1.1 (Added Editability Scoring)
+**Last Updated**: 2025-12-29
 
 ---
 
@@ -71,43 +71,56 @@ Select the single best frame from adaptive sampling results that:
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│         PHASE 2: Frame-Level Analysis (per moment)          │
+│         PHASE 2: Contextual Scoring (per frame)             │
 ├─────────────────────────────────────────────────────────────┤
-│  For each of 10 moments:                                     │
-│  → Download frames from GCS                                  │
-│  → Run visual analysis:                                      │
-│     • Face quality (expression, clarity, eye contact)        │
-│     • Composition (rule of thirds, contrast, colors)         │
-│     • Technical quality (sharpness, lighting, noise)         │
-│     • Psychological triggers (curiosity, emotion, surprise)  │
-│  → Score against channel brand                               │
-│  → Score against creative brief                              │
+│  For each candidate frame:                                   │
+│  → Compute niche-specific scores:                            │
+│     • Aesthetic quality (niche-adjusted criteria)            │
+│     • Psychology triggers (goal-aligned priorities)          │
+│     • Editability (workability for creators)                 │
+│     • Face quality (expression, clarity)                     │
+│     • Creator alignment (brand match)                        │
+│     • Technical quality (sharpness, exposure)                │
+│  → Weighted total score (niche-specific weights)             │
+│  → Sort frames by total score                                │
+│                                                              │
+│  NOTE: Scores are for INTERNAL analysis only, not shown     │
+│  to creators unless in debug mode.                           │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│         PHASE 3: Multi-Criteria Ranking                      │
+│         PHASE 3: Risk Advisory (VLM decision support)       │
 ├─────────────────────────────────────────────────────────────┤
-│  → Weighted scoring model:                                   │
-│     • Creator Alignment: 30%                                 │
-│     • Visual Quality: 25%                                    │
-│     • Psychology Score: 25%                                  │
-│     • Originality: 15%                                       │
-│     • Technical Quality: 5%                                  │
-│  → Rank all frames                                           │
-│  → Apply constraints/filters                                 │
+│  → VLM analyzes ALL frames visually                          │
+│  → Provides THREE strategic recommendations:                 │
+│     1. SAFE / DEFENSIBLE                                     │
+│        Low-regret, clear emotion, good baseline              │
+│     2. HIGH-VARIANCE / BOLD                                  │
+│        Standout potential with creative risk                 │
+│     3. AVOID / COMMON PITFALL                                │
+│        Tempting but often underperforms                      │
+│  → Plain-English explanations (no scores in creator view)    │
+│  → Debug data includes all scores for analysis               │
+│                                                              │
+│  PHILOSOPHY: Decision relief, not decision-making            │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│         OUTPUT: Best Frame + Explanation                     │
+│         OUTPUT: 3 Strategic Options + Debug Data            │
 ├─────────────────────────────────────────────────────────────┤
-│  • frame_path: gs://...                                      │
-│  • timestamp: 5.2s                                           │
-│  • final_score: 0.94                                         │
-│  • reasoning: "Selected for..."                              │
-│  • psychology_triggers: ["curiosity", "surprise"]            │
-│  • top_3_alternatives: [...]                                 │
+│  CREATOR-FACING OUTPUT:                                      │
+│  • safe: { frame, why, trade-offs }                          │
+│  • high_variance: { frame, why, risks }                      │
+│  • avoid: { frame, pitfall_explanation }                     │
+│  • meta: { confidence, user_control_note }                   │
+│                                                              │
+│  DEBUG OUTPUT (for developers):                              │
+│  • all_frames_scored: [ {scores, features, notes}, ... ]     │
+│  • scoring_notes: "How scores influenced choices"            │
+│                                                              │
+│  Creator makes final decision with confidence.               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -725,50 +738,100 @@ psychology_score = sum([
 
 ### Phase 3: Multi-Criteria Ranking
 
-**Final Score** (with aesthetic component):
+**Final Score** (with editability):
 ```python
 final_score = (
-    0.25 * creator_alignment_score +   # Matches brief + brand + goals
-    0.20 * aesthetic_score +            # Overall visual appeal ⭐ NEW
-    0.20 * psychology_score +           # Engagement triggers
-    0.15 * face_quality_score +         # Expression + emotion
-    0.10 * originality_score +          # Stands out in niche
-    0.05 * composition_score +          # Rule of thirds, balance
-    0.05 * technical_quality_score      # Sharpness, noise, exposure
+    0.22 * creator_alignment_score +   # Matches brief + brand + goals
+    0.18 * aesthetic_score +            # Overall visual appeal
+    0.18 * psychology_score +           # Engagement triggers
+    0.15 * editability_score +          # ⭐ NEW: Workability for creators
+    0.13 * face_quality_score +         # Expression + emotion
+    0.08 * originality_score +          # Stands out in niche
+    0.04 * composition_score +          # Rule of thirds, balance
+    0.02 * technical_quality_score      # Sharpness, noise, exposure
 )
 ```
 
 **Weight Justification**:
-- **25% Creator Alignment**: Most important - must match what creator wants
-- **20% Aesthetic Quality**: High visual appeal = professional look, stands out
-- **20% Psychology**: Engagement triggers drive clicks
-- **15% Face Quality**: Face is primary element in most thumbnails
-- **10% Originality**: Important in saturated niches
-- **5% Composition**: Supporting factor (included in aesthetics)
-- **5% Technical**: Minimum quality bar (rarely differentiator)
+- **22% Creator Alignment**: Most important - must match what creator wants
+- **18% Aesthetic Quality**: High visual appeal = professional look, stands out
+- **18% Psychology**: Engagement triggers drive clicks
+- **15% Editability**: Can creators crop, zoom, add text without losing impact?
+- **13% Face Quality**: Face is primary element in most thumbnails
+- **8% Originality**: Important in saturated niches
+- **4% Composition**: Supporting factor (included in aesthetics)
+- **2% Technical**: Minimum quality bar (rarely differentiator)
+
+#### Editability Score (NEW - v1.1)
+
+**Critical Question**: "Can this frame survive being cropped, zoomed, simplified, and still communicate emotion instantly?"
+
+Creators need frames they can actually work with. A beautiful frame is useless if:
+- Cropping removes the key emotion
+- No space for title text without covering the subject
+- Zooming loses context or emotional clarity
+- Compression/filters destroy the emotional impact
+
+```python
+editability_score = (
+    0.15 * crop_resilience +           # Can crop 30-40% and still work?
+    0.15 * zoom_potential +             # Can zoom 1.5-2x without losing emotion?
+    0.30 * text_overlay_space +         # Clear space for title text? ⭐ Critical
+    0.30 * emotion_resilience +         # Emotion survives simplification? ⭐ Critical
+    0.10 * composition_flexibility      # Multiple cropping options?
+)
+```
+
+**Components**:
+
+1. **Crop Resilience** (15%): Can crop 30-40% and still have good composition?
+2. **Zoom Potential** (15%): Can zoom 1.5-2x without losing emotional context?
+3. **Text Overlay Space** (30%): Clear areas for title without obscuring subject?
+4. **Emotion Resilience** (30%): Will emotion survive compression/filters?
+5. **Composition Flexibility** (10%): Multiple valid crop options available?
+
+**Why Editability Matters**:
+- 90% of creators add text overlays to thumbnails
+- Mobile viewers see tiny thumbnails (cropping common)
+- Platform compression destroys subtle emotions
+- Creators need flexibility for A/B testing variants
 
 **Adjustable by Niche**:
 ```python
-# For beauty/lifestyle channels (aesthetics matter more)
+# For beauty/lifestyle channels (aesthetics matter more, less text)
 weights = {
-    "creator_alignment": 0.20,
-    "aesthetic": 0.30,  # ⬆️ Higher
-    "psychology": 0.20,
-    "face_quality": 0.15,
-    "originality": 0.10,
+    "creator_alignment": 0.18,
+    "aesthetic": 0.28,  # ⬆️ Higher
+    "psychology": 0.18,
+    "editability": 0.13,  # ⬇️ Lower (less text overlays)
+    "face_quality": 0.13,
+    "originality": 0.06,
     "composition": 0.03,
-    "technical": 0.02
+    "technical": 0.01
 }
 
-# For educational/tech channels (psychology + clarity matter more)
+# For tech/educational channels (text overlays critical)
 weights = {
-    "creator_alignment": 0.25,
-    "aesthetic": 0.15,  # ⬇️ Lower
-    "psychology": 0.25,  # ⬆️ Higher
+    "creator_alignment": 0.22,
+    "aesthetic": 0.13,  # ⬇️ Lower
+    "psychology": 0.22,  # ⬆️ Higher
+    "editability": 0.18,  # ⬆️ Higher (text overlays critical)
+    "face_quality": 0.13,
+    "originality": 0.09,
+    "composition": 0.02,
+    "technical": 0.01
+}
+
+# For gaming channels (highest editability need)
+weights = {
+    "creator_alignment": 0.19,
+    "aesthetic": 0.15,
+    "psychology": 0.19,
+    "editability": 0.20,  # ⬆️ Highest (heavy text overlays)
     "face_quality": 0.15,
-    "originality": 0.12,
-    "composition": 0.05,
-    "technical": 0.03
+    "originality": 0.09,
+    "composition": 0.02,
+    "technical": 0.01
 }
 ```
 
