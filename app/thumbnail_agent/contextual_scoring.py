@@ -611,6 +611,155 @@ class ContextualScoringCriteria:
         }
 
     @classmethod
+    def evaluate_editability(
+        cls,
+        frame_features: dict[str, Any],
+        visual_analysis: dict[str, Any],
+        niche: str = "general",
+    ) -> dict[str, Any]:
+        """
+        Evaluate frame's editability - can it survive cropping, zooming, text overlays?
+
+        This answers the critical question: "Can this frame survive being cropped,
+        zoomed, simplified, and still communicate emotion instantly?"
+
+        Args:
+            frame_features: Detected features (composition, margins, etc.)
+            visual_analysis: Face analysis data (expression, landmarks, etc.)
+            niche: Content niche (affects text overlay importance)
+
+        Returns:
+            {
+                "overall_editability": float [0,1],
+                "crop_resilience": float [0,1],
+                "zoom_potential": float [0,1],
+                "text_overlay_space": float [0,1],
+                "emotion_resilience": float [0,1],
+                "composition_flexibility": float [0,1]
+            }
+        """
+        # ================================================================
+        # 1. CROP RESILIENCE
+        # Can we crop 30-40% and still have a good frame?
+        # ================================================================
+        crop_score = 0.7  # Base score
+
+        # Check if subject is centered (good for cropping)
+        composition = frame_features.get("composition", [])
+        if "centered_subject" in composition or "rule_of_thirds" in composition:
+            crop_score += 0.15
+
+        # Check face positioning (not too close to edges)
+        # TODO: In production, analyze actual landmark positions
+        # For now, assume centered faces are good
+        crop_score += 0.15
+
+        crop_score = min(crop_score, 1.0)
+
+        # ================================================================
+        # 2. ZOOM POTENTIAL
+        # Can we zoom in 1.5-2x without losing emotion/context?
+        # ================================================================
+        zoom_score = 0.6  # Base
+
+        # Strong facial expressions survive zooming better
+        expression_intensity = visual_analysis.get("expression_intensity", 0.5)
+        zoom_score += expression_intensity * 0.3
+
+        # Clear, uncluttered backgrounds help zooming
+        if "clean_background" in composition:
+            zoom_score += 0.1
+
+        zoom_score = min(zoom_score, 1.0)
+
+        # ================================================================
+        # 3. TEXT OVERLAY SPACE
+        # Is there clear space for title text without obscuring subject?
+        # ================================================================
+        text_space_score = 0.5  # Base
+
+        # Top/bottom margins good for text
+        # TODO: In production, analyze actual pixel regions
+        # For now, estimate based on composition
+        if "clean_background" in composition:
+            text_space_score += 0.2
+
+        # Face not filling entire frame = space for text
+        if expression_intensity < 0.8:  # Not an extreme close-up
+            text_space_score += 0.15
+
+        # Niche-specific: Gaming/tech need more text space
+        if niche in ["gaming", "tech", "educational", "tech_educational"]:
+            # These niches heavily rely on text overlays
+            text_space_score *= 1.15
+
+        text_space_score = min(text_space_score, 1.0)
+
+        # ================================================================
+        # 4. EMOTION RESILIENCE
+        # Will emotion survive simplification, filters, compression?
+        # ================================================================
+        emotion_resilience = 0.6  # Base
+
+        # Strong, clear emotions survive editing better
+        emotion = visual_analysis.get("dominant_emotion", "neutral")
+        if emotion != "neutral":
+            emotion_resilience += 0.15
+
+        # High expression intensity = clear emotion that survives
+        if expression_intensity > 0.7:
+            emotion_resilience += 0.2
+        elif expression_intensity > 0.5:
+            emotion_resilience += 0.1
+
+        # Extreme emotions (surprise, joy) survive better than subtle ones
+        if emotion in ["surprise", "joy", "shock", "excitement"]:
+            emotion_resilience += 0.1
+
+        emotion_resilience = min(emotion_resilience, 1.0)
+
+        # ================================================================
+        # 5. COMPOSITION FLEXIBILITY
+        # Multiple cropping options? Good rule of thirds adherence?
+        # ================================================================
+        composition_flex = 0.6  # Base
+
+        # Rule of thirds = flexible composition
+        if "rule_of_thirds" in composition:
+            composition_flex += 0.2
+
+        # Not too centered = more crop options
+        if "centered_subject" not in composition:
+            composition_flex += 0.1
+
+        # Dynamic composition = more flexibility
+        if "dynamic" in composition:
+            composition_flex += 0.1
+
+        composition_flex = min(composition_flex, 1.0)
+
+        # ================================================================
+        # OVERALL EDITABILITY SCORE
+        # ================================================================
+        # Weighted average - text space and emotion resilience most critical
+        overall = (
+            0.15 * crop_score
+            + 0.15 * zoom_score
+            + 0.30 * text_space_score  # Critical for thumbnails
+            + 0.30 * emotion_resilience  # Critical for impact
+            + 0.10 * composition_flex
+        )
+
+        return {
+            "overall_editability": overall,
+            "crop_resilience": crop_score,
+            "zoom_potential": zoom_score,
+            "text_overlay_space": text_space_score,
+            "emotion_resilience": emotion_resilience,
+            "composition_flexibility": composition_flex,
+        }
+
+    @classmethod
     def _map_niche_to_criteria_key(cls, niche: str) -> str:
         """Map niche string to criteria dictionary key."""
         niche_mapping = {

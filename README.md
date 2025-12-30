@@ -152,13 +152,83 @@ The pre-commit configuration includes:
 - File checks (trailing whitespace, end of file, YAML/JSON/TOML validation)
 - Security checks (private key detection)
 
-## API (WIP)
+## API - Thumbnail Generation
 
-This repo now includes a starter FastAPI service with a static thumbnail generation demo.
+The `/thumbnails/generate` endpoint integrates **adaptive sampling** + **AI thumbnail selection** into a complete pipeline.
 
-- Endpoint: `POST /thumbnails/generate`
-- Request model: describes input media and creative intent (`sources`, optional `profile_photo_url`, `mood`, `title_hint`, `goal`, `brand_colors`, `notes`).
-- Response model: returns a placeholder composition with demo assets and layer descriptions.
+### Full Pipeline
+
+```
+1. Adaptive Sampling (FREE, ~5-10s)
+   ├─ Analyze video pace (audio + visual signals)
+   ├─ Extract 5-10 candidate frames from key moments
+   └─ Upload frames to GCS
+
+2. AI Thumbnail Selection ($0.0023, ~2s)
+   ├─ Contextual scoring (niche-aware aesthetics)
+   ├─ Psychology trigger analysis (goal-aligned)
+   ├─ Gemini 2.5 Flash creative decision
+   └─ Detailed reasoning + recommendations
+
+3. Response
+   ├─ Selected frame URL
+   ├─ Confidence score
+   ├─ Detailed reasoning (6 dimensions)
+   ├─ Creator tips (text overlay placement)
+   └─ Cost breakdown
+```
+
+### Endpoint: `POST /thumbnails/generate`
+
+**Request:**
+```json
+{
+  "content_sources": {
+    "video_path": "gs://bucket/path/to/video.mp4"
+  },
+  "creative_brief": {
+    "title_hint": "I Built This in 24 Hours!",
+    "notes": "Surprising tech build challenge",
+    "mood": "energetic, dramatic"
+  },
+  "channel_profile": {
+    "content_niche": "tech reviews",
+    "growth_goal": "viral reach"
+  },
+  "target": {
+    "platform": "youtube",
+    "optimization": "CTR"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "project_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "draft",
+  "recommended_title": "I Built This in 24 Hours!",
+  "thumbnail_url": "gs://bucket/frames/frame_12800ms.jpg",
+  "selected_frame_url": "gs://bucket/frames/frame_12800ms.jpg",
+  "layers": [
+    {
+      "kind": "selected_frame",
+      "description": "AI-selected frame with surprise expression",
+      "asset_url": "gs://bucket/frames/frame_12800ms.jpg"
+    }
+  ],
+  "summary": "✅ Selected frame #2 at 12.8s\n\n📊 Confidence: 87%\n💰 Cost: $0.0023\n\n🎯 Why This Frame:\nCaptures genuine surprise with perfect expression intensity...\n\n💡 Creator Tip:\nPlace text above eyebrows to keep facial expression visible...\n\n📈 Key Strengths:\n  • Genuine surprise expression (0.91 intensity)\n  • Perfect centering with space for title\n  • Activates curiosity gap + emotional contagion"
+}
+```
+
+**Cost:** ~$0.0023 per generation (Gemini 2.5 Flash)
+
+**Features:**
+- ✅ **Niche-aware selection**: Beauty ≠ Tech ≠ Gaming standards
+- ✅ **Goal optimization**: CTR vs Subscribers vs Brand aligned
+- ✅ **Detailed reasoning**: 6-dimensional explanation (visual, niche fit, psychology, etc.)
+- ✅ **Creator tips**: Actionable suggestions for text overlay placement
+- ✅ **Adaptive sampling**: Intelligent frame extraction based on video pace
 
 ### Run locally
 
@@ -451,3 +521,166 @@ audio_scores = calculate_audio_score(
 #   "audio_score": 0.55         # Final score (product of all)
 # }
 ```
+
+---
+
+## 🎯 Thumbnail Selection Agent
+
+After adaptive sampling extracts candidate frames, the **Thumbnail Selection Agent** analyzes them and selects the best one for maximum engagement.
+
+### Architecture
+
+**Hybrid Approach** combining specialized models + Gemini 2.5 Flash VLM:
+
+```
+Phase 1: Contextual Scoring (FREE, ~500ms)
+├─ Niche-specific aesthetic evaluation (beauty ≠ tech ≠ gaming)
+├─ Goal-aligned psychology triggers (CTR vs subscribers vs brand)
+├─ Face quality analysis (expression, emotion, intensity)
+├─ Technical quality (sharpness, lighting, composition)
+└─ Weighted scoring based on channel niche
+
+Phase 2: Gemini 2.5 Flash Decision ($0.0023, ~2s)
+├─ Analyzes all frames + contextual scores
+├─ Creative judgment on brand fit and visual impact
+├─ Natural language reasoning for creators
+└─ Structured JSON output with confidence scores
+```
+
+### Cost & Performance
+
+| Metric | Value |
+|--------|-------|
+| **Cost per selection** | **$0.0023** |
+| **Speed** | ~2 seconds |
+| **Model** | Gemini 2.5 Flash |
+| **Frames analyzed** | Up to 10 candidates |
+
+**Cost at Scale:**
+- 100 selections: **$0.23**
+- 1,000 selections: **$2.30**
+- 10,000 selections: **$23.00**
+- 100,000 selections: **$230.00**
+
+**13x cheaper than GPT-4o** with comparable quality!
+
+### Usage
+
+```python
+from app.thumbnail_agent import ThumbnailSelector
+
+# Initialize selector (requires GEMINI_API_KEY env var)
+selector = ThumbnailSelector()
+
+# Select best thumbnail from adaptive sampling results
+result = await selector.select_best_thumbnail(
+    frames=extracted_frames,  # From adaptive sampling
+    creative_brief={
+        "video_title": "I Built This in 24 Hours",
+        "primary_message": "Surprising tech build challenge",
+        "target_emotion": "surprise",
+        "primary_goal": "maximize_ctr",
+        "tone": "energetic",
+    },
+    channel_profile={
+        "niche": "tech reviews",
+        "personality": ["energetic", "informative"],
+        "visual_style": "modern",
+    }
+)
+
+# Result includes:
+print(result["selected_frame_path"])        # Local path or GCS URL
+print(result["confidence"])                 # 0.0-1.0 confidence score
+
+# Detailed reasoning breakdown:
+print(result["reasoning"]["summary"])              # Why this frame is best
+print(result["reasoning"]["visual_analysis"])      # What Gemini sees in the image
+print(result["reasoning"]["niche_fit"])            # Why it works for this niche
+print(result["reasoning"]["goal_optimization"])    # How it achieves the goal
+print(result["reasoning"]["psychology_triggers"])  # Which triggers drive clicks
+
+print(result["key_strengths"])                     # ["curiosity trigger", "expression", ...]
+print(result["comparative_analysis"]["runner_up"]) # Why other frames fell short
+print(result["creator_message"])                   # Personalized explanation
+print(result["quantitative_scores"])               # All component scores
+print(result["cost_usd"])                          # Actual cost: ~$0.0023
+```
+
+### Key Features
+
+✅ **Niche-Aware Evaluation**:
+- Beauty channels prioritize aesthetics (soft lighting, warm tones)
+- Tech channels prioritize clarity (sharp focus, product visibility)
+- Gaming channels prioritize energy (bold colors, dynamic composition)
+
+✅ **Goal-Aligned Psychology**:
+- **Maximize CTR**: Prioritizes curiosity gap, pattern interrupt, surprise
+- **Grow Subscribers**: Prioritizes authority, authenticity, relatability
+- **Brand Building**: Prioritizes authenticity, aspiration, emotional contagion
+
+✅ **Detailed Explainability**:
+- **Structured reasoning** with 6 dimensions:
+  - Summary: Overall selection rationale
+  - Visual analysis: What Gemini sees in the image
+  - Niche fit: Why it works for this specific channel type
+  - Goal optimization: How it achieves the creator's goal
+  - Psychology triggers: Which mental triggers drive clicks
+  - Score alignment: How visual judgment compares to quantitative scores
+- **Comparative analysis**: Why other frames weren't selected
+- **Quantitative scores**: All component scores (aesthetic, psychology, face quality)
+- **Creator-friendly message**: Plain language explanation with text overlay suggestions
+
+✅ **Contextual Criteria**:
+- Aesthetic standards adapted to niche (beauty ≠ tech ≠ gaming)
+- Psychology triggers weighted by goal (CTR vs subscribers)
+- Tone adjustments (professional, casual, energetic, calm)
+
+### Cost Breakdown
+
+**Gemini 2.5 Flash Pricing** (as of January 2025):
+- Input: $0.30 per 1M tokens
+- Output: $2.50 per 1M tokens
+- Images: ~258 tokens each
+
+**Per Selection** (10 frames):
+```
+Input:  (10 images × 258 tokens) + 1,000 prompt = 3,580 tokens
+Output: ~500 tokens (JSON response)
+
+Input cost:  (3,580 / 1,000,000) × $0.30 = $0.00107
+Output cost: (500 / 1,000,000) × $2.50 = $0.00125
+Total: $0.0023
+```
+
+### Environment Variables
+
+```bash
+# Required
+export GEMINI_API_KEY="your-api-key"  # Get from https://ai.google.dev/
+
+# Optional (use Gemini 2.5 Pro for higher quality at $0.007/selection)
+selector = ThumbnailSelector(use_pro=True)
+```
+
+### API Endpoint (Coming Soon)
+
+```bash
+POST /thumbnails/select
+
+{
+  "frames": [...],           # From adaptive sampling
+  "creative_brief": {...},
+  "channel_profile": {...}
+}
+
+Response:
+{
+  "selected_frame_url": "gs://...",
+  "reasoning": "...",
+  "confidence": 0.92,
+  "cost_usd": 0.0023
+}
+```
+
+See `app/THUMBNAIL_SELECTION_AGENT_DESIGN.md` for full architecture details.

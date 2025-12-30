@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import cv2
-import mediapipe as mp
 import numpy as np
 import onnxruntime as ort
-from huggingface_hub import hf_hub_download
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import FaceLandmarkerOptions
 
 
 class FaceExpressionAnalyzer:
@@ -24,25 +24,48 @@ class FaceExpressionAnalyzer:
         Args:
             model_path: Path to FER+ ONNX model. If None, downloads from HuggingFace.
         """
-        # MediaPipe for face structure (landmarks, geometry)
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
+        # MediaPipe FaceLandmarker (new API in MediaPipe 0.10+)
+        from mediapipe import tasks
+
+        # Download face landmarker model
+        model_dir = Path.home() / ".cache" / "mediapipe"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_asset_path = model_dir / "face_landmarker.task"
+
+        if not model_asset_path.exists():
+            print("Downloading face landmarker model...")
+            import urllib.request
+
+            url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+            urllib.request.urlretrieve(url, str(model_asset_path))
+            print(f"Downloaded to {model_asset_path}")
+
+        # Configure FaceLandmarker
+        options = FaceLandmarkerOptions(
+            base_options=tasks.BaseOptions(model_asset_path=str(model_asset_path)),
+            running_mode=vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
+
+        self.face_landmarker = vision.FaceLandmarker.create_from_options(options)
 
         # Download FER+ model from HuggingFace if not provided
         if model_path is None:
-            print("Downloading FER+ ONNX model from HuggingFace...")
-            model_path = Path(
-                hf_hub_download(
-                    repo_id="nateraw/ferplus-onnx",
-                    filename="model.onnx",
-                )
-            )
-            print(f"Downloaded FER+ model to {model_path}")
+            print("Downloading FER+ ONNX model...")
+            model_dir_fer = Path.home() / ".cache" / "ferplus"
+            model_dir_fer.mkdir(parents=True, exist_ok=True)
+            model_path = model_dir_fer / "emotion-ferplus-8.onnx"
+
+            if not model_path.exists():
+                # Download from ONNX Model Zoo
+                import urllib.request
+
+                url = "https://github.com/onnx/models/raw/main/validated/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
+                urllib.request.urlretrieve(url, str(model_path))
+                print(f"Downloaded FER+ model to {model_path}")
 
         # Load FER+ emotion model
         self.emotion_model = ort.InferenceSession(
@@ -87,13 +110,19 @@ class FaceExpressionAnalyzer:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w = image.shape[:2]
 
-        # MediaPipe face detection and landmarks
-        results = self.face_mesh.process(rgb)
+        # Create MediaPipe Image object
+        from mediapipe import Image as MPImage
+        from mediapipe import ImageFormat
 
-        if not results.multi_face_landmarks:
+        mp_image = MPImage(image_format=ImageFormat.SRGB, data=rgb)
+
+        # MediaPipe face detection and landmarks (new API)
+        detection_result = self.face_landmarker.detect(mp_image)
+
+        if not detection_result.face_landmarks:
             return self._empty_result()
 
-        landmarks = results.multi_face_landmarks[0]
+        landmarks = detection_result.face_landmarks[0]
 
         # Extract geometric features
         eye_openness = self._calculate_eye_openness(landmarks, h, w)
@@ -114,7 +143,8 @@ class FaceExpressionAnalyzer:
         expression_intensity = 1.0 - emotion_probs.get("neutral", 0.5)
 
         # Convert landmarks to list for motion tracking
-        landmark_coords = [(lm.x, lm.y, lm.z) for lm in landmarks.landmark]
+        # New API: landmarks is a list of NormalizedLandmark objects
+        landmark_coords = [(lm.x, lm.y, lm.z) for lm in landmarks]
 
         return {
             "has_face": True,
@@ -159,18 +189,18 @@ class FaceExpressionAnalyzer:
         def eye_aspect_ratio(upper, lower, left, right):
             # Vertical distance (average of two measurements)
             v1 = np.linalg.norm(
-                np.array([landmarks.landmark[upper[0]].x, landmarks.landmark[upper[0]].y])
-                - np.array([landmarks.landmark[lower[0]].x, landmarks.landmark[lower[0]].y])
+                np.array([landmarks[upper[0]].x, landmarks[upper[0]].y])
+                - np.array([landmarks[lower[0]].x, landmarks[lower[0]].y])
             )
             v2 = np.linalg.norm(
-                np.array([landmarks.landmark[upper[1]].x, landmarks.landmark[upper[1]].y])
-                - np.array([landmarks.landmark[lower[1]].x, landmarks.landmark[lower[1]].y])
+                np.array([landmarks[upper[1]].x, landmarks[upper[1]].y])
+                - np.array([landmarks[lower[1]].x, landmarks[lower[1]].y])
             )
 
             # Horizontal distance
             h = np.linalg.norm(
-                np.array([landmarks.landmark[left[0]].x, landmarks.landmark[left[0]].y])
-                - np.array([landmarks.landmark[right[0]].x, landmarks.landmark[right[0]].y])
+                np.array([landmarks[left[0]].x, landmarks[left[0]].y])
+                - np.array([landmarks[right[0]].x, landmarks[right[0]].y])
             )
 
             # Eye aspect ratio
@@ -201,18 +231,18 @@ class FaceExpressionAnalyzer:
 
         # Vertical distance (average)
         v1 = np.linalg.norm(
-            np.array([landmarks.landmark[MOUTH_UPPER[0]].x, landmarks.landmark[MOUTH_UPPER[0]].y])
-            - np.array([landmarks.landmark[MOUTH_LOWER[0]].x, landmarks.landmark[MOUTH_LOWER[0]].y])
+            np.array([landmarks[MOUTH_UPPER[0]].x, landmarks[MOUTH_UPPER[0]].y])
+            - np.array([landmarks[MOUTH_LOWER[0]].x, landmarks[MOUTH_LOWER[0]].y])
         )
         v2 = np.linalg.norm(
-            np.array([landmarks.landmark[MOUTH_UPPER[1]].x, landmarks.landmark[MOUTH_UPPER[1]].y])
-            - np.array([landmarks.landmark[MOUTH_LOWER[1]].x, landmarks.landmark[MOUTH_LOWER[1]].y])
+            np.array([landmarks[MOUTH_UPPER[1]].x, landmarks[MOUTH_UPPER[1]].y])
+            - np.array([landmarks[MOUTH_LOWER[1]].x, landmarks[MOUTH_LOWER[1]].y])
         )
 
         # Horizontal distance
         h = np.linalg.norm(
-            np.array([landmarks.landmark[MOUTH_LEFT[0]].x, landmarks.landmark[MOUTH_LEFT[0]].y])
-            - np.array([landmarks.landmark[MOUTH_RIGHT[0]].x, landmarks.landmark[MOUTH_RIGHT[0]].y])
+            np.array([landmarks[MOUTH_LEFT[0]].x, landmarks[MOUTH_LEFT[0]].y])
+            - np.array([landmarks[MOUTH_RIGHT[0]].x, landmarks[MOUTH_RIGHT[0]].y])
         )
 
         # Mouth aspect ratio
@@ -230,10 +260,10 @@ class FaceExpressionAnalyzer:
         This is a simplified estimation using nose and eye positions.
         """
         # Key landmarks for head pose
-        nose_tip = landmarks.landmark[1]
-        left_eye = landmarks.landmark[33]
-        right_eye = landmarks.landmark[263]
-        mouth_center = landmarks.landmark[13]
+        nose_tip = landmarks[1]
+        left_eye = landmarks[33]
+        right_eye = landmarks[263]
+        mouth_center = landmarks[13]
 
         # Yaw (left-right rotation) - based on nose position
         yaw = np.arctan2(nose_tip.x - 0.5, 0.5) * 180 / np.pi
@@ -259,8 +289,8 @@ class FaceExpressionAnalyzer:
         FER+ expects 64x64 grayscale face images.
         """
         # Get bounding box from landmarks
-        x_coords = [lm.x * img_w for lm in landmarks.landmark]
-        y_coords = [lm.y * img_h for lm in landmarks.landmark]
+        x_coords = [lm.x * img_w for lm in landmarks]
+        y_coords = [lm.y * img_h for lm in landmarks]
 
         x_min = max(0, int(min(x_coords)))
         x_max = min(img_w, int(max(x_coords)))

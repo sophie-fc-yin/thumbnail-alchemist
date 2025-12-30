@@ -3,8 +3,8 @@
 Common utilities for storage, file handling, and other shared functionality.
 """
 
-from app.utils.storage import upload_to_gcs
+from app.utils.storage import upload_file_to_gcs
 
 __all__ = [
-    "upload_to_gcs",
+    "upload_file_to_gcs",
 ]

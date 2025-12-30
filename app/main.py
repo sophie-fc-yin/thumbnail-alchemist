@@ -14,7 +14,6 @@ from app.models import (
     AudioBreakdownRequest,
     AudioBreakdownResponse,
     CompositionLayer,
-    FrameScore,
     PaceSegment,
     PaceStatistics,
     ProcessingStats,
@@ -28,7 +27,6 @@ from app.models import (
     VideoUrlRequest,
     VideoUrlResponse,
     VisionBreakdownRequest,
-    VisionBreakdownResponse,
 )
 from app.utils.storage import (
     StorageError,
@@ -36,8 +34,6 @@ from app.utils.storage import (
     generate_signed_upload_url,
     upload_file_to_gcs,
 )
-from app.vision.extraction import extract_candidate_frames, validate_and_load_content
-from app.vision.stack import analyze_frame_quality, rank_frames
 
 app = FastAPI(title="Thumbnail Alchemist API", version="0.1.0")
 
@@ -215,137 +211,8 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     )
 
 
-@app.post("/vision/breakdown", response_model=VisionBreakdownResponse)
-async def breakdown_vision(payload: VisionBreakdownRequest) -> VisionBreakdownResponse:
-    """
-    Break down video/images into scored frames.
-
-    Returns scored frames with quality metrics and rankings.
-    """
-    # Use provided project_id or generate new one
-    project_id = payload.project_id or str(uuid4())
-
-    # Create SourceMedia object
-    source_media = SourceMedia(video_path=payload.video_path)
-
-    # Get video duration first
-    import asyncio
-    import shutil
-
-    ffprobe_path = shutil.which("ffprobe")
-    if ffprobe_path:
-        from app.vision.extraction import generate_signed_url
-
-        video_url = generate_signed_url(payload.video_path)
-
-        probe_process = await asyncio.create_subprocess_exec(
-            ffprobe_path,
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            video_url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await probe_process.communicate()
-        try:
-            video_duration = float(stdout.decode().strip())
-        except (ValueError, AttributeError):
-            video_duration = None
-    else:
-        video_duration = None
-
-    # Extract frames from video (keep local for analysis)
-    candidate_frames = await extract_candidate_frames(
-        content_sources=source_media,
-        project_id=project_id,
-        max_frames=payload.max_frames,
-        upload_to_gcs=False,  # Don't upload yet - need local files for analysis
-    )
-
-    if not candidate_frames:
-        raise ValueError("No frames extracted or provided")
-
-    # Calculate timestamp for each frame (evenly distributed across video duration)
-    frame_timestamps = {}
-    if video_duration:
-        for idx, frame_path in enumerate(candidate_frames):
-            timestamp = (
-                (idx / max(1, len(candidate_frames) - 1)) * video_duration
-                if len(candidate_frames) > 1
-                else 0
-            )
-            frame_timestamps[str(frame_path)] = timestamp
-
-    # Analyze frame quality (requires local files)
-    frame_signals = analyze_frame_quality(candidate_frames)
-
-    # Rank frames by quality
-    ranked_frames = rank_frames(frame_signals)
-
-    # Upload frames to GCS after analysis
-    from pathlib import Path
-
-    from google.cloud import storage
-
-    gcs_frame_urls = {}
-    try:
-        client = storage.Client()
-        bucket = client.bucket("clickmoment-prod-assets")
-
-        for signal in ranked_frames:
-            local_path = Path(signal.path)
-            blob_path = f"projects/{project_id}/signals/frames/{local_path.name}"
-            blob = bucket.blob(blob_path)
-            blob.upload_from_filename(str(local_path))
-
-            gcs_url = f"gs://clickmoment-prod-assets/{blob_path}"
-            gcs_frame_urls[str(local_path)] = gcs_url
-
-            # Delete local file after upload
-            local_path.unlink()
-    except Exception as e:
-        print(f"Failed to upload frames to GCS: {e}")
-
-    # Convert to response format
-    scored_frames = [
-        FrameScore(
-            frame_path=gcs_frame_urls.get(str(signal.path), str(signal.path)),
-            timestamp=frame_timestamps.get(str(signal.path)),
-            brightness=signal.brightness,
-            sharpness=signal.sharpness,
-            motion=signal.motion,
-            face_score=signal.face,
-            expression_score=signal.expression,
-            highlight_score=signal.highlight_score,
-            rank=idx + 1,
-        )
-        for idx, signal in enumerate(ranked_frames)
-    ]
-
-    best_frame = scored_frames[0] if scored_frames else None
-
-    # Build summary with safe formatting
-    if best_frame and best_frame.highlight_score is not None:
-        face_score_str = f"{best_frame.face_score:.3f}" if best_frame.face_score else "0.000"
-        summary = f"Analyzed {len(scored_frames)} frames. Best frame has highlight score of {best_frame.highlight_score:.3f} with face detection score of {face_score_str}."
-    else:
-        summary = f"Analyzed {len(scored_frames)} frames."
-
-    return VisionBreakdownResponse(
-        project_id=project_id,
-        total_frames=len(scored_frames),
-        scored_frames=scored_frames,
-        best_frame=best_frame,
-        summary=summary,
-    )
-
-
-@app.post("/vision/adaptive-sampling", response_model=AdaptiveSamplingResponse)
-async def adaptive_sampling(payload: VisionBreakdownRequest) -> AdaptiveSamplingResponse:
+@app.post("/vision/breakdown", response_model=AdaptiveSamplingResponse)
+async def breakdown_vision(payload: VisionBreakdownRequest) -> AdaptiveSamplingResponse:
     """
     Extract frames using adaptive pace-based sampling.
 
@@ -390,96 +257,261 @@ async def adaptive_sampling(payload: VisionBreakdownRequest) -> AdaptiveSampling
 
 @app.post("/thumbnails/generate", response_model=ThumbnailResponse)
 async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
+    """
+    Generate thumbnail using adaptive sampling + AI selection agent.
+
+    Pipeline:
+    1. Adaptive sampling → Extract candidate frames based on pace
+    2. Thumbnail selection agent → AI picks best frame with detailed reasoning
+    3. Return selected frame + composition suggestions
+
+    Cost: ~$0.0023 per generation (Gemini 2.5 Flash)
+    """
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
-    # Extract and process incoming request data
-    content_sources = payload.content_sources
-    _profile_photos = payload.profile_photos
-    _target = payload.target
-    creative_brief = payload.creative_brief
+    print(f"\n{'='*70}")
+    print(f"THUMBNAIL GENERATION - Project {project_id}")
+    print(f"{'='*70}")
 
-    # Validate all content source paths exist and are accessible, then extract metadata
-    _content_metadata = await validate_and_load_content(content_sources)
+    # Extract video path
+    video_path = payload.content_sources.video_path
+    if not video_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="video_path is required in content_sources",
+        )
 
-    # Extract candidate frames from video
-    candidate_frames = await extract_candidate_frames(content_sources, project_id=project_id)
+    # ========================================================================
+    # STEP 1: Adaptive Sampling - Extract candidate frames
+    # ========================================================================
+    print(f"\n{'─'*70}")
+    print("STEP 1: Adaptive Sampling")
+    print(f"{'─'*70}")
+    print(f"Video: {video_path}")
 
-    # TODO: analyze_frame_quality - Score frames based on composition, lighting, emotion, and platform requirements
-    # scored_frames = await analyze_frame_quality(candidate_frames, target.platform, creative_brief.mood)
+    adaptive_result = await orchestrate_adaptive_sampling(
+        video_path=video_path,
+        project_id=project_id,
+        max_frames=10,  # Extract up to 10 candidates
+        upload_to_gcs=True,
+    )
 
-    # TODO: select_best_frame - Choose optimal frame based on scoring algorithm and optimization target
-    # selected_frame = select_best_frame(scored_frames, target.optimization)
+    candidate_frame_urls = adaptive_result["frames"]
+    print(f"✅ Extracted {len(candidate_frame_urls)} candidate frames")
 
-    # TODO: create_user_avatar - Load and analyze profile photo files to create/select best avatar for thumbnail composition
-    # This processes multiple profile photo files from provided paths to find the best pose, angle, and expression
-    # user_avatar = await create_user_avatar(profile_photos, target.platform, creative_brief.mood) if profile_photos else None
+    # Load adaptive sampling analysis to get frame metadata
+    import json
 
-    # TODO: generate_background_layer - Create or select background using mood, brand colors, and platform
-    # background_layer = await generate_background_layer(selected_frame, creative_brief.mood, creative_brief.brand_colors, target.platform)
+    from google.cloud import storage
 
-    # TODO: extract_subject - Remove background from subject and prepare for composition
-    # subject_layer = await extract_subject(selected_frame, user_avatar)
+    # Download analysis JSON from GCS
+    analysis_json_url = adaptive_result.get("analysis_json_url")
+    if not analysis_json_url:
+        raise ValueError("No analysis JSON URL in adaptive sampling result")
 
-    # TODO: generate_title_text - Use AI to generate compelling title based on hint, notes, and content analysis
-    # generated_title = await generate_title_text(creative_brief.title_hint, creative_brief.notes, content_metadata)
+    # Parse GCS path
+    gcs_path = analysis_json_url.replace("gs://clickmoment-prod-assets/", "")
+    client = storage.Client()
+    bucket = client.bucket("clickmoment-prod-assets")
+    blob = bucket.blob(gcs_path)
 
-    # TODO: design_title_layer - Create title typography with styling, effects, and brand colors
-    # title_layer = await design_title_layer(generated_title, creative_brief.brand_colors, creative_brief.mood)
+    # Download and parse JSON
+    analysis_data = json.loads(blob.download_as_text())
+    extracted_frames = analysis_data.get("extracted_frames", [])
 
-    # TODO: identify_callout_elements - Determine what visual callouts would enhance thumbnail based on platform and optimization target
-    # callout_elements = await identify_callout_elements(selected_frame, target.platform, target.optimization)
+    if not extracted_frames:
+        raise ValueError("No frames found in adaptive sampling analysis")
 
-    # TODO: compose_final_thumbnail - Combine all layers into final thumbnail composition optimized for platform
-    # final_thumbnail = await compose_final_thumbnail(
-    #     background_layer, subject_layer, title_layer, callout_elements, target.platform
-    # )
+    # ========================================================================
+    # STEP 2: Map request data to thumbnail selector format
+    # ========================================================================
+    print(f"\n{'─'*70}")
+    print("STEP 2: Preparing Thumbnail Selection Agent")
+    print(f"{'─'*70}")
 
-    # TODO: upload_to_storage - Upload generated assets to cloud storage and return URLs
-    # uploaded_assets = await upload_to_storage(final_thumbnail, selected_frame, user_avatar, project_id)
+    # Map creative brief
+    selector_brief = {
+        "video_title": payload.creative_brief.title_hint or "Untitled Video",
+        "primary_message": payload.creative_brief.notes or "No description provided",
+        "target_emotion": "curiosity",  # Default
+        "primary_goal": _map_optimization_to_goal(payload.target.optimization),
+        "tone": _infer_tone_from_mood(payload.creative_brief.mood),
+    }
 
-    # Return mock response for now
+    # Map channel profile
+    selector_profile = {
+        "niche": payload.channel_profile.content_niche or "general",
+        "personality": _infer_personality(payload.creative_brief.mood),
+        "visual_style": _infer_visual_style(payload.creative_brief.mood),
+    }
+
+    print(f"Creative Brief: {selector_brief['video_title']}")
+    print(f"Goal: {selector_brief['primary_goal']}")
+    print(f"Niche: {selector_profile['niche']}")
+
+    # ========================================================================
+    # STEP 3: Run Thumbnail Selection Agent
+    # ========================================================================
+    print(f"\n{'─'*70}")
+    print("STEP 3: AI Thumbnail Selection")
+    print(f"{'─'*70}")
+
+    from app.thumbnail_agent import ThumbnailSelector
+
+    # Initialize selector (uses GEMINI_API_KEY)
+    try:
+        selector = ThumbnailSelector(use_pro=False)  # Use Flash by default
+    except ValueError as e:
+        # GEMINI_API_KEY not set - return mock response
+        print(f"⚠️  {e}")
+        print("Returning mock response without AI selection")
+
+        return ThumbnailResponse(
+            project_id=project_id,
+            status="draft",
+            recommended_title=payload.creative_brief.title_hint or "AI-Generated Thumbnail",
+            thumbnail_url=candidate_frame_urls[0]
+            if candidate_frame_urls
+            else "https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=1200&q=80",
+            selected_frame_url=candidate_frame_urls[0] if candidate_frame_urls else None,
+            profile_variant_url=None,
+            layers=[],
+            summary=f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. Set GEMINI_API_KEY to enable AI-powered thumbnail selection.",
+        )
+
+    # Run selection agent
+    selection_result = await selector.select_best_thumbnail(
+        frames=extracted_frames,
+        creative_brief=selector_brief,
+        channel_profile=selector_profile,
+    )
+
+    print(f"✅ Selected frame #{selection_result['selected_frame_number']}")
+    print(f"Confidence: {selection_result['confidence']:.0%}")
+    print(f"Cost: ${selection_result['cost_usd']:.4f}")
+
+    # ========================================================================
+    # STEP 4: Build Response
+    # ========================================================================
+    print(f"\n{'─'*70}")
+    print("STEP 4: Building Response")
+    print(f"{'─'*70}")
+
+    # Extract reasoning for summary
+    reasoning = selection_result["reasoning"]
+    summary_parts = [
+        f"✅ Selected frame #{selection_result['selected_frame_number']} at {selection_result['selected_frame_timestamp']:.1f}s",
+        f"\n\n📊 Confidence: {selection_result['confidence']:.0%}",
+        f"\n💰 Cost: ${selection_result['cost_usd']:.4f}",
+        "\n\n🎯 Why This Frame:",
+        f"\n{reasoning['summary']}",
+        "\n\n💡 Creator Tip:",
+        f"\n{selection_result['creator_message']}",
+        "\n\n📈 Key Strengths:",
+    ]
+    for strength in selection_result["key_strengths"]:
+        summary_parts.append(f"\n  • {strength}")
+
+    summary_text = "".join(summary_parts)
+
+    # Build composition layers based on selection
+    layers = [
+        CompositionLayer(
+            kind="selected_frame",
+            description=f"AI-selected frame with {selection_result['quantitative_scores']['emotion']} expression",
+            asset_url=selection_result["selected_frame_url"],
+        ),
+        CompositionLayer(
+            kind="title",
+            description=f"Title overlay optimized for {selector_brief['primary_goal']}",
+            asset_url=None,
+        ),
+    ]
+
     return ThumbnailResponse(
         project_id=project_id,
         status="draft",
-        recommended_title=creative_brief.title_hint or "The AI That Designs Thumbnails For You",
-        thumbnail_url="https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f"
-        "?auto=format&fit=crop&w=1200&q=80",
-        selected_frame_url="https://images.unsplash.com/photo-1521737604893-d14cc237f11d"
-        "?auto=format&fit=crop&w=900&q=80",
-        profile_variant_url="https://images.unsplash.com/photo-1494790108377-be9c29b29330"
-        "?auto=format&fit=crop&w=800&q=80",
-        layers=[
-            CompositionLayer(
-                kind="background",
-                description="High-energy gradient with subtle glow to lift the subject.",
-                asset_url="https://images.unsplash.com/photo-1502082553048-f009c37129b9"
-                "?auto=format&fit=crop&w=1200&q=80",
-            ),
-            CompositionLayer(
-                kind="subject",
-                description="Cutout of creator with key light on the right shoulder.",
-                asset_url="https://images.unsplash.com/photo-1469474968028-56623f02e42e"
-                "?auto=format&fit=crop&w=800&q=80",
-            ),
-            CompositionLayer(
-                kind="title",
-                description="Bold, uppercase typography with yellow stroke and drop shadow.",
-                asset_url=None,
-            ),
-            CompositionLayer(
-                kind="callout",
-                description="Arrow pointing at the laptop screen to anchor viewer focus.",
-                asset_url=None,
-            ),
-        ],
-        summary=(
-            f"Draft composition combining your sources with a bold, high-contrast layout. "
-            f"Collected {len(candidate_frames)} candidate frame(s) from your uploads. "
-            "Static assets are returned for now; a later iteration will run the full "
-            "agent pipeline to select frames, pose the subject, and render the final thumbnail."
-        ),
+        recommended_title=payload.creative_brief.title_hint or "AI-Selected Thumbnail",
+        thumbnail_url=selection_result["selected_frame_url"],
+        selected_frame_url=selection_result["selected_frame_url"],
+        profile_variant_url=None,
+        layers=layers,
+        summary=summary_text,
     )
+
+
+# ============================================================================
+# Helper Functions for Mapping Request Data
+# ============================================================================
+
+
+def _map_optimization_to_goal(optimization: str | None) -> str:
+    """Map optimization target to primary_goal."""
+    if not optimization:
+        return "maximize_ctr"
+
+    opt_lower = optimization.lower()
+    if "ctr" in opt_lower or "click" in opt_lower:
+        return "maximize_ctr"
+    elif "subscriber" in opt_lower or "grow" in opt_lower:
+        return "grow_subscribers"
+    elif "brand" in opt_lower or "authority" in opt_lower:
+        return "brand_building"
+    else:
+        return "maximize_ctr"
+
+
+def _infer_tone_from_mood(mood: str | None) -> str:
+    """Infer tone from creative brief mood."""
+    if not mood:
+        return "professional"
+
+    mood_lower = mood.lower()
+    if any(word in mood_lower for word in ["energetic", "exciting", "dynamic", "bold"]):
+        return "energetic"
+    elif any(word in mood_lower for word in ["calm", "peaceful", "serene", "soft"]):
+        return "calm"
+    elif any(word in mood_lower for word in ["casual", "fun", "playful", "relaxed"]):
+        return "casual"
+    else:
+        return "professional"
+
+
+def _infer_personality(mood: str | None) -> list[str]:
+    """Infer personality traits from mood."""
+    if not mood:
+        return ["professional"]
+
+    mood_lower = mood.lower()
+    traits = []
+
+    if "energetic" in mood_lower or "exciting" in mood_lower:
+        traits.append("energetic")
+    if "professional" in mood_lower or "polished" in mood_lower:
+        traits.append("professional")
+    if "warm" in mood_lower or "friendly" in mood_lower:
+        traits.append("warm")
+    if "informative" in mood_lower or "educational" in mood_lower:
+        traits.append("informative")
+
+    return traits or ["professional"]
+
+
+def _infer_visual_style(mood: str | None) -> str:
+    """Infer visual style from mood."""
+    if not mood:
+        return "modern"
+
+    mood_lower = mood.lower()
+    if "minimalist" in mood_lower or "clean" in mood_lower:
+        return "minimalist"
+    elif "bold" in mood_lower or "dramatic" in mood_lower:
+        return "bold"
+    elif "vintage" in mood_lower or "retro" in mood_lower:
+        return "vintage"
+    else:
+        return "modern"
 
 
 @app.post(

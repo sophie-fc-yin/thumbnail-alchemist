@@ -509,11 +509,77 @@ Best for: {use_case}
 
 ---
 
-**Recommendation**: **Hybrid approach with GPT-4o for Phase 2**
+**Recommendation**: **Hybrid approach with Gemini 2.5 Flash** ⭐
 
 This gives you:
 - ✅ Speed and cost efficiency from specialized models
 - ✅ Intelligence and nuance from VLM
 - ✅ Explainability from both quantitative and qualitative analysis
-- ✅ ~$0.03 per selection (affordable at scale)
-- ✅ ~5 seconds total (acceptable UX)
+- ✅ **~$0.0023 per selection** (13x cheaper than GPT-4o!)
+- ✅ ~2 seconds total (excellent UX)
+
+## UPDATE: Gemini 2.5 Flash - Production Recommendation
+
+### Why Gemini 2.5 Flash?
+
+**Cost Advantage**:
+- Gemini 2.5 Flash: **$0.0023** per selection
+- GPT-4o: $0.03 per selection
+- **13x cheaper** with comparable quality
+
+**Pricing** (as of January 2025):
+- Input: $0.30 per 1M tokens
+- Output: $2.50 per 1M tokens
+- Images: ~258 tokens each
+
+**Cost Calculation** (10 frames + prompt):
+```
+Input tokens: (10 images × 258) + 1,000 prompt = 3,580 tokens
+Output tokens: ~500 tokens (JSON response)
+
+Input cost: (3,580 / 1,000,000) × $0.30 = $0.00107
+Output cost: (500 / 1,000,000) × $2.50 = $0.00125
+Total: ~$0.0023 per selection
+```
+
+**At Scale**:
+| Volume | Gemini 2.5 Flash | GPT-4o | Savings |
+|--------|------------------|--------|---------|
+| 100 selections | $0.23 | $3.00 | 92% |
+| 1,000 selections | $2.30 | $30.00 | 92% |
+| 10,000 selections | $23.00 | $300.00 | 92% |
+| 100,000 selections | $230.00 | $3,000.00 | 92% |
+
+### Implementation
+
+```python
+import google.generativeai as genai
+from app.thumbnail_agent import ThumbnailSelector
+
+# Initialize with Gemini API key
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+
+# Create selector (uses Gemini 2.5 Flash by default)
+selector = ThumbnailSelector()
+
+# Or use Gemini 2.5 Pro for higher quality ($0.007 per selection)
+selector_pro = ThumbnailSelector(use_pro=True)
+
+# Select best thumbnail
+result = await selector.select_best_thumbnail(
+    frames=extracted_frames,
+    creative_brief=brief,
+    channel_profile=profile
+)
+
+print(f"Selected: {result['selected_frame_path']}")
+print(f"Reasoning: {result['reasoning']}")
+print(f"Cost: ${result['cost_usd']:.4f}")
+```
+
+### Features:
+- ✅ Native JSON mode (structured output)
+- ✅ 1M token context window (handles long briefs)
+- ✅ Fast (1-2s response time)
+- ✅ Multimodal (text + images)
+- ✅ High quality reasoning

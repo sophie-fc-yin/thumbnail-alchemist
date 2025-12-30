@@ -14,8 +14,11 @@ from app.thumbnail_agent.scoring_weights import (
     list_available_niches,
     preview_niche_weights,
 )
+from app.thumbnail_agent.thumbnail_selector import ThumbnailSelector
 
 __all__ = [
+    # Main agent
+    "ThumbnailSelector",
     # Scoring weights
     "ScoringWeights",
     "get_scoring_weights",

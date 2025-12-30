@@ -17,116 +17,127 @@ class ScoringWeights:
 
     # Default balanced weights
     DEFAULT = {
-        "creator_alignment": 0.25,
-        "aesthetic_quality": 0.20,
-        "psychology_score": 0.20,
-        "face_quality": 0.15,
-        "originality": 0.10,
-        "composition": 0.05,
-        "technical_quality": 0.05,
+        "creator_alignment": 0.22,
+        "aesthetic_quality": 0.18,
+        "psychology_score": 0.18,
+        "editability": 0.15,  # NEW: Workability for cropping, text, edits
+        "face_quality": 0.13,
+        "originality": 0.08,
+        "composition": 0.04,
+        "technical_quality": 0.02,
     }
 
     # Niche-specific weight presets
     NICHE_PRESETS = {
         # Beauty, fashion, lifestyle, vlogging
         "beauty_lifestyle": {
-            "creator_alignment": 0.20,
-            "aesthetic_quality": 0.30,  # ⬆️ Aesthetics critical
-            "psychology_score": 0.20,
-            "face_quality": 0.15,
-            "originality": 0.08,
-            "composition": 0.05,
-            "technical_quality": 0.02,
+            "creator_alignment": 0.18,
+            "aesthetic_quality": 0.28,  # ⬆️ Aesthetics critical
+            "psychology_score": 0.18,
+            "editability": 0.13,  # Moderate - less text, more visual
+            "face_quality": 0.13,
+            "originality": 0.06,
+            "composition": 0.03,
+            "technical_quality": 0.01,
         },
         # Tech reviews, tutorials, how-to
         "tech_educational": {
-            "creator_alignment": 0.25,
-            "aesthetic_quality": 0.15,  # ⬇️ Less critical
-            "psychology_score": 0.25,  # ⬆️ Curiosity/clarity key
-            "face_quality": 0.15,
-            "originality": 0.12,
-            "composition": 0.05,
-            "technical_quality": 0.03,
+            "creator_alignment": 0.22,
+            "aesthetic_quality": 0.13,  # ⬇️ Less critical
+            "psychology_score": 0.22,  # ⬆️ Curiosity/clarity key
+            "editability": 0.18,  # ⬆️ High - text overlays critical
+            "face_quality": 0.13,
+            "originality": 0.09,
+            "composition": 0.02,
+            "technical_quality": 0.01,
         },
         # Gaming, let's plays, gaming news
         "gaming": {
-            "creator_alignment": 0.22,
-            "aesthetic_quality": 0.18,
-            "psychology_score": 0.22,  # ⬆️ Hype and excitement
-            "face_quality": 0.18,  # ⬆️ Reactions important
-            "originality": 0.12,
-            "composition": 0.05,
-            "technical_quality": 0.03,
+            "creator_alignment": 0.19,
+            "aesthetic_quality": 0.15,
+            "psychology_score": 0.19,  # ⬆️ Hype and excitement
+            "editability": 0.20,  # ⬆️ Highest - heavy text overlays
+            "face_quality": 0.15,  # ⬆️ Reactions important
+            "originality": 0.09,
+            "composition": 0.02,
+            "technical_quality": 0.01,
         },
         # Commentary, reaction, opinion videos
         "commentary": {
-            "creator_alignment": 0.25,
-            "aesthetic_quality": 0.15,
-            "psychology_score": 0.20,
-            "face_quality": 0.20,  # ⬆️ Expression is key
-            "originality": 0.12,
-            "composition": 0.05,
-            "technical_quality": 0.03,
+            "creator_alignment": 0.22,
+            "aesthetic_quality": 0.13,
+            "psychology_score": 0.18,
+            "editability": 0.14,  # Moderate - some text for context
+            "face_quality": 0.18,  # ⬆️ Expression is key
+            "originality": 0.10,
+            "composition": 0.03,
+            "technical_quality": 0.02,
         },
         # Cooking, recipes, food content
         "cooking_food": {
-            "creator_alignment": 0.20,
-            "aesthetic_quality": 0.28,  # ⬆️ Food must look good
-            "psychology_score": 0.20,
-            "face_quality": 0.12,  # ⬇️ Food can be focus
-            "originality": 0.12,
-            "composition": 0.06,  # ⬆️ Plating matters
-            "technical_quality": 0.02,
+            "creator_alignment": 0.18,
+            "aesthetic_quality": 0.25,  # ⬆️ Food must look good
+            "psychology_score": 0.18,
+            "editability": 0.16,  # Recipe text overlays common
+            "face_quality": 0.10,  # ⬇️ Food can be focus
+            "originality": 0.09,
+            "composition": 0.03,  # Plating matters
+            "technical_quality": 0.01,
         },
         # Fitness, health, wellness
         "fitness_health": {
-            "creator_alignment": 0.22,
-            "aesthetic_quality": 0.25,  # ⬆️ Results/transformation
-            "psychology_score": 0.22,  # Aspiration
-            "face_quality": 0.13,
-            "originality": 0.10,
-            "composition": 0.05,
-            "technical_quality": 0.03,
+            "creator_alignment": 0.20,
+            "aesthetic_quality": 0.22,  # ⬆️ Results/transformation
+            "psychology_score": 0.20,  # Aspiration
+            "editability": 0.15,  # Motivational text overlays
+            "face_quality": 0.11,
+            "originality": 0.08,
+            "composition": 0.03,
+            "technical_quality": 0.01,
         },
         # Business, finance, motivation
         "business_finance": {
-            "creator_alignment": 0.25,
-            "aesthetic_quality": 0.18,
-            "psychology_score": 0.23,  # ⬆️ Authority/credibility
-            "face_quality": 0.18,  # ⬆️ Trust signals
-            "originality": 0.10,
-            "composition": 0.04,
-            "technical_quality": 0.02,
+            "creator_alignment": 0.22,
+            "aesthetic_quality": 0.16,
+            "psychology_score": 0.20,  # ⬆️ Authority/credibility
+            "editability": 0.17,  # ⬆️ Professional text overlays
+            "face_quality": 0.15,  # ⬆️ Trust signals
+            "originality": 0.07,
+            "composition": 0.02,
+            "technical_quality": 0.01,
         },
         # Entertainment, comedy, sketches
         "entertainment": {
-            "creator_alignment": 0.22,
-            "aesthetic_quality": 0.18,
-            "psychology_score": 0.24,  # ⬆️ Curiosity/surprise
-            "face_quality": 0.18,  # Expressions
-            "originality": 0.12,  # ⬆️ Stand out
-            "composition": 0.04,
-            "technical_quality": 0.02,
+            "creator_alignment": 0.20,
+            "aesthetic_quality": 0.16,
+            "psychology_score": 0.21,  # ⬆️ Curiosity/surprise
+            "editability": 0.15,  # Moderate - context text
+            "face_quality": 0.16,  # Expressions
+            "originality": 0.09,  # ⬆️ Stand out
+            "composition": 0.02,
+            "technical_quality": 0.01,
         },
         # Music, covers, performances
         "music": {
-            "creator_alignment": 0.20,
-            "aesthetic_quality": 0.28,  # ⬆️ Visual appeal
-            "psychology_score": 0.20,
-            "face_quality": 0.12,
-            "originality": 0.12,
-            "composition": 0.06,  # ⬆️ Artistic composition
-            "technical_quality": 0.02,
+            "creator_alignment": 0.18,
+            "aesthetic_quality": 0.26,  # ⬆️ Visual appeal
+            "psychology_score": 0.18,
+            "editability": 0.13,  # ⬇️ Lower - visual dominates
+            "face_quality": 0.10,
+            "originality": 0.10,
+            "composition": 0.04,  # ⬆️ Artistic composition
+            "technical_quality": 0.01,
         },
         # News, journalism, documentary
         "news_journalism": {
-            "creator_alignment": 0.28,  # ⬆️ Brief match critical
-            "aesthetic_quality": 0.15,
-            "psychology_score": 0.22,
-            "face_quality": 0.18,  # Authority
-            "originality": 0.10,
-            "composition": 0.05,
-            "technical_quality": 0.02,
+            "creator_alignment": 0.25,  # ⬆️ Brief match critical
+            "aesthetic_quality": 0.13,
+            "psychology_score": 0.19,
+            "editability": 0.17,  # ⬆️ Headlines critical
+            "face_quality": 0.15,  # Authority
+            "originality": 0.08,
+            "composition": 0.02,
+            "technical_quality": 0.01,
         },
     }
 

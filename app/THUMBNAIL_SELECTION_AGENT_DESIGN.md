@@ -772,6 +772,182 @@ weights = {
 }
 ```
 
+---
+
+### Contextual Scoring: Context-Aware Aesthetic & Psychology Evaluation
+
+**Problem**: Generic aesthetic and psychology scoring doesn't account for niche-specific criteria and creator goals.
+
+**Solution**: Make scoring components **contextually aware** - adapt evaluation criteria based on channel niche and creative brief.
+
+#### What Makes "Good Aesthetics" Different by Niche
+
+Same frame can be:
+- **Excellent** for beauty channel (soft lighting, warm tones, polished)
+- **Poor** for tech channel (needs bright, sharp, clear product visibility)
+- **Average** for gaming channel (needs high saturation, dramatic lighting, energy)
+
+#### Niche-Specific Aesthetic Criteria
+
+Each niche has different aesthetic priorities:
+
+**Beauty/Lifestyle Channels**:
+```python
+aesthetic_criteria = {
+    "lighting": {
+        "preferred": ["soft", "warm", "golden_hour", "ring_light"],
+        "avoid": ["harsh", "overhead", "fluorescent"],
+        "weight": 0.25  # Critical for beauty
+    },
+    "color_palette": {
+        "preferred": ["pastel", "warm_tones", "complementary"],
+        "avoid": ["oversaturated", "clashing", "muddy"],
+        "weight": 0.25
+    },
+    "polish_level": {
+        "preferred": ["professional", "edited", "magazine_quality"],
+        "avoid": ["raw", "unedited", "amateur"],
+        "weight": 0.20
+    }
+}
+```
+
+**Tech/Educational Channels**:
+```python
+aesthetic_criteria = {
+    "clarity": {
+        "preferred": ["sharp", "readable_text", "clear_details"],
+        "avoid": ["blurry", "unreadable", "soft_focus"],
+        "weight": 0.30  # ⬆️ Highest priority for tech
+    },
+    "lighting": {
+        "preferred": ["bright", "even", "studio_lighting"],
+        "avoid": ["dim", "uneven", "overly_artistic"],
+        "weight": 0.15
+    },
+    "composition": {
+        "preferred": ["tech_visible", "clear_subject", "uncluttered"],
+        "avoid": ["obscured_product", "unclear_focus"],
+        "weight": 0.25
+    }
+}
+```
+
+**Gaming Channels**:
+```python
+aesthetic_criteria = {
+    "color_palette": {
+        "preferred": ["saturated", "bold", "neon", "RGB"],
+        "avoid": ["desaturated", "muted", "monotone"],
+        "weight": 0.25  # ⬆️ Bold colors critical
+    },
+    "energy_level": {
+        "preferred": ["high_energy", "intense", "exciting"],
+        "avoid": ["calm", "subdued", "low_energy"],
+        "weight": 0.25  # ⬆️ Energy is key
+    },
+    "composition": {
+        "preferred": ["dynamic", "action_focused", "cinematic"],
+        "avoid": ["static", "boring", "passive"],
+        "weight": 0.25
+    }
+}
+```
+
+#### Niche-Specific Psychology Triggers
+
+Different niches respond to different psychological triggers:
+
+**Beauty/Lifestyle**: Aspiration (30%), Emotional Contagion (25%), Curiosity (20%)
+**Tech/Educational**: Curiosity Gap (35%), Authority (25%), Clarity (20%)
+**Gaming**: Excitement (30%), Surprise (25%), Triumph (20%)
+**Commentary**: Authenticity (30%), Relatability (25%), Controversy (20%)
+
+#### Goal-Driven Psychology Prioritization
+
+Same triggers, different priorities based on creator goal:
+
+**Goal: Maximize CTR**
+- Priority triggers: curiosity_gap, pattern_interrupt, surprise, fomo
+- Boost weights: curiosity +30%, surprise +25%
+
+**Goal: Grow Subscribers**
+- Priority triggers: authority, authenticity, relatability, social_proof
+- Boost weights: authority +30%, authenticity +25%
+
+**Goal: Brand Building**
+- Priority triggers: authenticity, aspiration, authority, emotional_contagion
+- Boost weights: authenticity +30%, aspiration +25%
+
+#### Tone Adjustments
+
+Creator's tone preference further refines criteria:
+
+**Professional Tone**:
+- Aesthetic boost: polish_level, clarity, clean_background
+- Psychology boost: authority, clarity, utility
+- Aesthetic penalty: raw, unpolished, casual
+
+**Casual Tone**:
+- Aesthetic boost: natural, authentic, relatable
+- Psychology boost: authenticity, relatability, emotional_contagion
+- Aesthetic penalty: overly_polished, corporate
+
+**Energetic Tone**:
+- Aesthetic boost: vibrant, high_contrast, dynamic
+- Psychology boost: excitement, surprise, fomo
+- Aesthetic penalty: subdued, calm, muted
+
+#### Contextual Scoring Integration
+
+```python
+# 1. Get niche + brief specific criteria
+aesthetic_criteria = get_aesthetic_criteria(channel_profile, creative_brief)
+psychology_priorities = get_psychology_priorities(channel_profile, creative_brief)
+
+# 2. Evaluate frame against contextual criteria
+aesthetic_score = evaluate_aesthetic_alignment(
+    frame_features,  # Detected: lighting, colors, composition
+    aesthetic_criteria  # Niche + tone adjusted criteria
+)
+
+psychology_score = evaluate_psychology_alignment(
+    detected_triggers,  # Detected: curiosity_gap, authority, etc.
+    psychology_priorities  # Goal-prioritized triggers
+)
+
+# 3. Use contextual scores in final weighted calculation
+final_score = (
+    0.25 * creator_alignment +
+    0.20 * aesthetic_score +      # ← Contextually evaluated
+    0.20 * psychology_score +     # ← Contextually evaluated
+    0.15 * face_quality +
+    0.10 * originality +
+    0.05 * composition +
+    0.05 * technical_quality
+)
+```
+
+**Example: Same Frame, Different Scores**
+
+Frame: Soft lighting, warm tones, gentle smile
+
+**Beauty Channel** (professional tone, brand building goal):
+- Aesthetic: 0.91 ✅ (matches soft + warm + polished criteria)
+- Psychology: 0.88 ✅ (aspiration + emotional_contagion align with brand goal)
+- **Final Score: 0.89**
+
+**Tech Channel** (professional tone, maximize CTR goal):
+- Aesthetic: 0.62 ⚠️ (soft focus doesn't meet clarity requirement 30%)
+- Psychology: 0.65 ⚠️ (missing curiosity_gap, top priority for CTR)
+- **Final Score: 0.68**
+
+**Result**: Same frame scores 30% higher for beauty channel due to contextual evaluation.
+
+**Implementation**: See `app/thumbnail_agent/contextual_scoring.py` and `contextual_scoring_examples.py`
+
+---
+
 #### Creator Alignment Score
 ```python
 creator_alignment = (
