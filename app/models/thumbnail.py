@@ -39,7 +39,13 @@ class ChannelProfile(BaseModel):
     )
     content_niche: Optional[str] = Field(
         None,
-        description="Primary content category or niche (e.g., 'tech reviews', 'cooking tutorials', 'gaming commentary').",
+        description=(
+            "Primary content category or niche. Affects scoring weights, aesthetic criteria, and advisory guidance. "
+            "Supported niches: 'gaming', 'tech'/'tech reviews'/'educational', 'beauty'/'lifestyle', "
+            "'commentary'/'reaction', 'cooking'/'food', 'fitness'/'health', 'business'/'finance', "
+            "'entertainment'/'comedy', 'music', 'news'/'journalism'. "
+            "Defaults to 'general' if not specified."
+        ),
         max_length=100,
     )
     upload_frequency: Optional[str] = Field(
@@ -109,7 +115,7 @@ class ThumbnailRequest(BaseModel):
                 {
                     "project_id": "60a8336a-3d5d-45eb-a390-b52ab9f2dcb2",
                     "content_sources": {
-                        "video_path": "https://storage.cloud.google.com/clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/video.mp4",
+                        "video_path": "gs://clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/videos/1116_1_.mp4",
                     },
                     "profile_photos": [
                         "https://storage.cloud.google.com/clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/avatar/headshot.jpg"
