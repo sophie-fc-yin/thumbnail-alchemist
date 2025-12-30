@@ -243,7 +243,7 @@ def calculate_audio_energy_delta(
             timestamps.append(event["time"] / 1000.0)  # Convert ms to seconds
         elif event["type"] == "segment":
             energy_values.append(event.get("avg_energy", 0.0))
-            timestamps.append(event["start"] / 1000.0)  # Convert ms to seconds
+            timestamps.append(event["start_ms"] / 1000.0)  # Convert ms to seconds
 
     if not energy_values:
         return []
@@ -304,7 +304,7 @@ def calculate_speech_emotion_delta(
             energy = event.get("avg_energy", 0.0)
             emotion = (pitch + energy) / 2.0
             emotion_values.append(emotion)
-            timestamps.append(event["start"] / 1000.0)  # Convert ms to seconds
+            timestamps.append(event["start_ms"] / 1000.0)  # Convert ms to seconds
 
     if not emotion_values:
         return []
