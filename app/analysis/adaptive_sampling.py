@@ -53,6 +53,12 @@ DEFAULT_MAX_DURATION_SECONDS = 1800  # 30 minutes
 INITIAL_SAMPLE_RATIO = 5  # Sample 1/5 of max frames initially (min 20)
 PACE_SEGMENTATION_THRESHOLD = 0.2  # Pace change threshold for segmentation
 
+# Dynamic max_frames calculation
+FRAMES_PER_MINUTE = 10  # Target density: 1 frame every 6 seconds
+MAX_VIDEO_LENGTH_MINUTES = 15  # Cap max_frames at 15 minutes worth
+CALCULATED_MAX_FRAMES_CAP = FRAMES_PER_MINUTE * MAX_VIDEO_LENGTH_MINUTES  # 150 frames
+MIN_FRAMES_FOR_ANALYSIS = 20  # Minimum frames for proper analysis
+
 # GCS Buckets
 GCS_TEMP_BUCKET = "clickmoment-prod-temp"
 GCS_ASSETS_BUCKET = "clickmoment-prod-assets"
@@ -71,10 +77,31 @@ DERIVED_MEDIA_DIR = "derived-media"
 FRAMES_DIR = "frames"
 
 
+def calculate_max_frames_for_duration(duration_seconds: float) -> int:
+    """
+    Calculate optimal max_frames based on video duration.
+
+    Uses a target density of 1 frame per 6 seconds (10 frames/minute),
+    capped at 15 minutes worth (150 frames) to avoid excessive processing
+    on very long videos.
+
+    Args:
+        duration_seconds: Video duration in seconds
+
+    Returns:
+        Calculated max_frames (between MIN_FRAMES_FOR_ANALYSIS and CALCULATED_MAX_FRAMES_CAP)
+    """
+    duration_minutes = duration_seconds / 60.0
+    calculated_frames = int(duration_minutes * FRAMES_PER_MINUTE)
+
+    # Apply min and max bounds
+    return max(MIN_FRAMES_FOR_ANALYSIS, min(calculated_frames, CALCULATED_MAX_FRAMES_CAP))
+
+
 async def orchestrate_adaptive_sampling(
     video_path: str,
     project_id: str,
-    max_frames: int = DEFAULT_MAX_FRAMES,
+    max_frames: int | None = None,
     upload_to_gcs: bool = True,
 ) -> dict[str, Any]:
     """
@@ -149,6 +176,18 @@ async def orchestrate_adaptive_sampling(
     audio_timeline = audio_analysis["timeline"]
     stats["audio_time"] = time.time() - step_start
     print(f"[Orchestrator] Audio breakdown complete: {len(audio_timeline)} events")
+
+    # Calculate max_frames dynamically if not provided
+    video_duration = audio_analysis.get("duration_seconds", 0.0)
+    if max_frames is None:
+        max_frames = calculate_max_frames_for_duration(video_duration)
+        print(
+            f"[Orchestrator] Calculated max_frames={max_frames} "
+            f"for {video_duration/60:.1f}min video "
+            f"(~{FRAMES_PER_MINUTE} frames/min, capped at {MAX_VIDEO_LENGTH_MINUTES}min)"
+        )
+    else:
+        print(f"[Orchestrator] Using provided max_frames={max_frames}")
 
     # ========================================================================
     # STEP 2: Initial Sparse Frame Sampling

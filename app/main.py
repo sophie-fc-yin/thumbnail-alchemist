@@ -292,7 +292,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     adaptive_result = await orchestrate_adaptive_sampling(
         video_path=video_path,
         project_id=project_id,
-        max_frames=10,  # Extract up to 10 candidates
+        max_frames=None,  # Auto-calculate based on video duration
         upload_to_gcs=True,
     )
 
