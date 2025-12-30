@@ -240,7 +240,7 @@ def calculate_audio_energy_delta(
     for event in audio_timeline:
         if event["type"] == "energy_peak":
             energy_values.append(event["energy"])
-            timestamps.append(event["time"] / 1000.0)  # Convert ms to seconds
+            timestamps.append(event["time_ms"] / 1000.0)  # Convert ms to seconds
         elif event["type"] == "segment":
             energy_values.append(event.get("avg_energy", 0.0))
             timestamps.append(event["start_ms"] / 1000.0)  # Convert ms to seconds
