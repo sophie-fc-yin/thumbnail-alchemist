@@ -13,7 +13,6 @@ from app.models import (
     AdaptiveSamplingResponse,
     AudioBreakdownRequest,
     AudioBreakdownResponse,
-    CompositionLayer,
     PaceSegment,
     PaceStatistics,
     ProcessingStats,
@@ -410,7 +409,12 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
             selected_frame_url=candidate_frame_urls[0] if candidate_frame_urls else None,
             profile_variant_url=None,
             layers=[],
-            summary=f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. Set GEMINI_API_KEY to enable AI-powered thumbnail selection.",
+            advisory=None,
+            total_frames_extracted=len(candidate_frame_urls),
+            analysis_json_url=adaptive_result.get("analysis_json_url"),
+            cost_usd=None,
+            gemini_model=None,
+            summary=f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. Set GEMINI_API_KEY to enable AI-powered thumbnail advisory with strategic options (safe/bold/avoid).",
         )
 
     # Run selection agent
@@ -420,9 +424,18 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         channel_profile=selector_profile,
     )
 
-    print(f"✅ Selected frame #{selection_result['selected_frame_number']}")
-    print(f"Confidence: {selection_result['confidence']:.0%}")
-    print(f"Cost: ${selection_result['cost_usd']:.4f}")
+    # Extract advisory data from Gemini response
+    safe_option = selection_result.get("safe", {})
+    high_variance_option = selection_result.get("high_variance", {})
+    avoid_option = selection_result.get("avoid", {})
+    meta = selection_result.get("meta", {})
+    debug_data = selection_result.get("debug", {})
+
+    print("✅ AI Advisory Generated")
+    print(f"📊 Confidence: {meta.get('confidence', 'unknown')}")
+    print(f"💡 Safe option: {safe_option.get('frame_id', 'N/A')}")
+    print(f"🎯 Bold option: {high_variance_option.get('frame_id', 'N/A')}")
+    print(f"⚠️  Avoid: {avoid_option.get('frame_id', 'N/A')}")
 
     # ========================================================================
     # STEP 4: Build Response
@@ -431,45 +444,88 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     print("STEP 4: Building Response")
     print(f"{'─'*70}")
 
-    # Extract reasoning for summary
-    reasoning = selection_result["reasoning"]
-    summary_parts = [
-        f"✅ Selected frame #{selection_result['selected_frame_number']} at {selection_result['selected_frame_timestamp']:.1f}s",
-        f"\n\n📊 Confidence: {selection_result['confidence']:.0%}",
-        f"\n💰 Cost: ${selection_result['cost_usd']:.4f}",
-        "\n\n🎯 Why This Frame:",
-        f"\n{reasoning['summary']}",
-        "\n\n💡 Creator Tip:",
-        f"\n{selection_result['creator_message']}",
-        "\n\n📈 Key Strengths:",
-    ]
-    for strength in selection_result["key_strengths"]:
-        summary_parts.append(f"\n  • {strength}")
+    # Helper function to extract frame number and URL from frame_id
+    def get_frame_info(frame_id: str) -> tuple[int, str]:
+        """Extract frame number from 'Frame X' format."""
+        try:
+            num = int(frame_id.replace("Frame", "").strip())
+            # Find matching frame in extracted_frames
+            if 0 < num <= len(extracted_frames):
+                frame = extracted_frames[num - 1]
+                return num, frame.get("url", "")
+        except (ValueError, IndexError):
+            pass
+        return 1, extracted_frames[0].get("url", "") if extracted_frames else ""
 
+    # Build advisory with full data
+    from app.models.thumbnail import AdvisoryMeta, FrameOption, ThumbnailAdvisory
+
+    safe_num, safe_url = get_frame_info(safe_option.get("frame_id", "Frame 1"))
+    advisory = ThumbnailAdvisory(
+        safe=FrameOption(
+            frame_id=safe_option.get("frame_id", "Frame 1"),
+            frame_number=safe_num,
+            timestamp=safe_option.get("timestamp", "0.0s"),
+            frame_url=safe_url,
+            one_liner=safe_option.get("one_liner", ""),
+            reasons=safe_option.get("reasons", []),
+            risk_notes=safe_option.get("risk_notes", []),
+        ),
+        high_variance=FrameOption(
+            frame_id=high_variance_option.get("frame_id", "Frame 1"),
+            frame_number=get_frame_info(high_variance_option.get("frame_id", "Frame 1"))[0],
+            timestamp=high_variance_option.get("timestamp", "0.0s"),
+            frame_url=get_frame_info(high_variance_option.get("frame_id", "Frame 1"))[1],
+            one_liner=high_variance_option.get("one_liner", ""),
+            reasons=high_variance_option.get("reasons", []),
+            risk_notes=high_variance_option.get("risk_notes", []),
+        ),
+        avoid=FrameOption(
+            frame_id=avoid_option.get("frame_id", "Frame 1"),
+            frame_number=get_frame_info(avoid_option.get("frame_id", "Frame 1"))[0],
+            timestamp=avoid_option.get("timestamp", "0.0s"),
+            frame_url=get_frame_info(avoid_option.get("frame_id", "Frame 1"))[1],
+            one_liner=avoid_option.get("one_liner", ""),
+            reasons=avoid_option.get("reasons", []),
+            risk_notes=avoid_option.get("risk_notes", []),
+        ),
+        meta=AdvisoryMeta(
+            confidence=meta.get("confidence", "medium"),
+            what_changed=meta.get("what_changed", ""),
+            user_control_note=meta.get("user_control_note", ""),
+        ),
+        debug=debug_data,
+    )
+
+    # Build summary text
+    summary_parts = [
+        "✅ AI Thumbnail Advisory Generated",
+        f"\n\n📊 Confidence: {meta.get('confidence', 'medium').upper()}",
+        f"\n🎯 Total Frames Analyzed: {len(extracted_frames)}",
+        f"\n\n🛡️  SAFE OPTION (Frame {safe_num}):",
+        f"\n{safe_option.get('one_liner', '')}",
+        "\n\n🚀 BOLD OPTION:",
+        f"\n{high_variance_option.get('one_liner', '')}",
+        "\n\n⚠️  AVOID:",
+        f"\n{avoid_option.get('one_liner', '')}",
+        f"\n\n💡 {meta.get('user_control_note', 'You decide which option fits your vision best.')}",
+    ]
     summary_text = "".join(summary_parts)
 
-    # Build composition layers based on selection
-    layers = [
-        CompositionLayer(
-            kind="selected_frame",
-            description=f"AI-selected frame with {selection_result['quantitative_scores']['emotion']} expression",
-            asset_url=selection_result["selected_frame_url"],
-        ),
-        CompositionLayer(
-            kind="title",
-            description=f"Title overlay optimized for {selector_brief['primary_goal']}",
-            asset_url=None,
-        ),
-    ]
-
+    # Use safe option as default thumbnail_url
     return ThumbnailResponse(
         project_id=project_id,
         status="draft",
-        recommended_title=payload.creative_brief.title_hint or "AI-Selected Thumbnail",
-        thumbnail_url=selection_result["selected_frame_url"],
-        selected_frame_url=selection_result["selected_frame_url"],
+        recommended_title=payload.creative_brief.title_hint or "AI-Analyzed Thumbnail Options",
+        thumbnail_url=safe_url,
+        selected_frame_url=safe_url,
         profile_variant_url=None,
-        layers=layers,
+        layers=[],
+        advisory=advisory,
+        total_frames_extracted=len(extracted_frames),
+        analysis_json_url=adaptive_result.get("analysis_json_url"),
+        cost_usd=selection_result.get("cost_usd"),
+        gemini_model=selection_result.get("gemini_model"),
         summary=summary_text,
     )
 

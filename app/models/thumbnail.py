@@ -152,14 +152,83 @@ class CompositionLayer(BaseModel):
     asset_url: Optional[HttpUrl] = Field(None, description="Static asset preview if available.")
 
 
+class FrameOption(BaseModel):
+    """A strategic frame option with reasoning."""
+
+    frame_id: str = Field(..., description="Frame identifier (e.g., 'Frame 3')")
+    frame_number: int = Field(..., description="Frame index number")
+    timestamp: str = Field(..., description="Timestamp in video (e.g., '5.2s')")
+    frame_url: Optional[HttpUrl] = Field(None, description="URL to frame image")
+    one_liner: str = Field(..., description="Short explanation (max 18 words)")
+    reasons: list[str] = Field(..., description="2 specific reasons for this choice")
+    risk_notes: list[str] = Field(
+        default_factory=list, description="Optional considerations (0-2 items)"
+    )
+
+
+class FrameDebugInfo(BaseModel):
+    """Debug scoring information for a frame."""
+
+    frame_id: str
+    timestamp: str
+    total_score: float
+    aesthetic: float
+    psychology: float
+    editability: float
+    face_quality: float
+    creator_alignment: float
+    emotion: str
+    expression_intensity: float
+    triggers: list[str]
+    why_chosen_or_not: str
+
+
+class AdvisoryMeta(BaseModel):
+    """Metadata about the advisory decision."""
+
+    confidence: Literal["low", "medium", "high"]
+    what_changed: str = Field(..., description="Strategic differences between options")
+    user_control_note: str = Field(..., description="Supportive reminder for creator")
+
+
+class ThumbnailAdvisory(BaseModel):
+    """AI advisory with strategic frame options."""
+
+    safe: FrameOption = Field(..., description="Low-regret, defensible choice")
+    high_variance: FrameOption = Field(..., description="Bold choice with upside potential")
+    avoid: FrameOption = Field(..., description="Common pitfall to avoid")
+    meta: AdvisoryMeta = Field(..., description="Advisory metadata")
+    debug: dict = Field(
+        default_factory=dict,
+        description="Debug data including all_frames_scored and scoring_notes",
+    )
+
+
 class ThumbnailResponse(BaseModel):
-    """Static demo response returned by the generate endpoint."""
+    """Response from thumbnail generation endpoint with AI advisory."""
 
     project_id: str
     status: Literal["draft", "final"]
     recommended_title: str
-    thumbnail_url: HttpUrl
-    selected_frame_url: Optional[HttpUrl]
-    profile_variant_url: Optional[HttpUrl]
-    layers: list[CompositionLayer]
+
+    # Legacy fields (for backwards compatibility)
+    thumbnail_url: HttpUrl = Field(..., description="Default/safe option frame URL")
+    selected_frame_url: Optional[HttpUrl] = Field(None, description="Alias for thumbnail_url")
+    profile_variant_url: Optional[HttpUrl] = None
+    layers: list[CompositionLayer] = Field(default_factory=list)
+
+    # New advisory data
+    advisory: Optional[ThumbnailAdvisory] = Field(
+        None, description="AI strategic options (safe/bold/avoid)"
+    )
+
+    # Processing metadata
+    total_frames_extracted: int = Field(..., description="Total frames from adaptive sampling")
+    analysis_json_url: Optional[str] = Field(
+        None, description="GCS URL to comprehensive analysis JSON"
+    )
+    cost_usd: Optional[float] = Field(None, description="AI selection cost in USD")
+    gemini_model: Optional[str] = Field(None, description="Gemini model used for selection")
+
+    # Summary
     summary: str
