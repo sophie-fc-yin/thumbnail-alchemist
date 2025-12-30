@@ -248,8 +248,17 @@ async def orchestrate_adaptive_sampling(
             else 0
         )
 
+        speech_idx = (
+            min(
+                int(timestamp / video_duration * len(speech_emotion_deltas)),
+                len(speech_emotion_deltas) - 1,
+            )
+            if speech_emotion_deltas
+            else 0
+        )
+
         audio_delta = audio_energy_deltas[audio_idx] if audio_energy_deltas else 0.0
-        speech_delta = speech_emotion_deltas[audio_idx] if speech_emotion_deltas else 0.0
+        speech_delta = speech_emotion_deltas[speech_idx] if speech_emotion_deltas else 0.0
 
         # Get audio_score from timeline (find closest segment)
         timestamp_ms = timestamp * 1000
