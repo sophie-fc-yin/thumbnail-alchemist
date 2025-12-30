@@ -302,17 +302,43 @@ class ThumbnailSelector:
 
         # Load images
         images = []
+        temp_dir = Path("/tmp/thumbnail_selector_frames")
+        temp_dir.mkdir(exist_ok=True)
+
         for i, frame in enumerate(scored_frames, 1):
             try:
-                # Try local path first
-                path = frame.get("path")
-                if path and Path(path).exists():
+                path = frame.get("path") or frame.get("url")
+
+                # Handle GCS URLs
+                if path and path.startswith("gs://"):
+                    # Download from GCS temporarily
+                    from google.cloud import storage
+
+                    # Parse GCS URL: gs://bucket/path/to/file.jpg
+                    gcs_path = path.replace("gs://", "")
+                    bucket_name = gcs_path.split("/")[0]
+                    blob_path = "/".join(gcs_path.split("/")[1:])
+
+                    # Download to temp
+                    client = storage.Client()
+                    bucket = client.bucket(bucket_name)
+                    blob = bucket.blob(blob_path)
+
+                    local_path = temp_dir / f"frame_{i}.jpg"
+                    blob.download_to_filename(str(local_path))
+
+                    img = Image.open(local_path)
+                    images.append(img)
+
+                # Handle local paths
+                elif path and Path(path).exists():
                     img = Image.open(path)
                     images.append(img)
+
                 else:
                     print(f"⚠️  Frame {i}: Could not load from {path}")
-                    # TODO: Handle GCS URLs - download temporarily
                     images.append(None)
+
             except Exception as e:
                 print(f"⚠️  Frame {i}: Error loading image: {e}")
                 images.append(None)

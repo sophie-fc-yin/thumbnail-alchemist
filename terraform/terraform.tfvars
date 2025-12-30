@@ -13,7 +13,7 @@ service_name               = "thumbnail-alchemist"
 compute_service_account    = "90067411133-compute@developer.gserviceaccount.com"
 request_timeout_seconds    = 900  # 15 minutes
 cpu_limit                  = "2"  # 2 vCPUs
-memory_limit               = "4Gi" # 4 GB
+memory_limit               = "2Gi" # 2 GB
 min_instances              = 0    # Scale to zero
 max_instances              = 10
 
