@@ -13,8 +13,8 @@ from app.models import (
     AdaptiveSamplingResponse,
     AudioBreakdownRequest,
     AudioBreakdownResponse,
-    PaceSegment,
-    PaceStatistics,
+    ImportanceSegment,
+    ImportanceStatistics,
     ProcessingStats,
     SignedUrlRequest,
     SignedUrlResponse,
@@ -213,17 +213,17 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
 @app.post("/vision/breakdown", response_model=AdaptiveSamplingResponse)
 async def breakdown_vision(payload: VisionBreakdownRequest) -> AdaptiveSamplingResponse:
     """
-    Extract frames using adaptive pace-based sampling.
+    Extract frames using adaptive moment-importance-based sampling.
 
     This endpoint orchestrates the full pipeline:
     1. Audio breakdown → extract audio timeline
-    2. Initial sparse sampling → sample frames for pace analysis
+    2. Initial sparse sampling → sample frames for importance analysis
     3. Face analysis → detect expressions and motion
-    4. Pace calculation → combine audio + visual signals
-    5. Adaptive extraction → dense sampling where pace is high
+    4. Moment importance calculation → combine audio + visual signals
+    5. Adaptive extraction → dense sampling around important moments
     6. Storage → upload all frames to GCS
 
-    Returns frames with pace segments and processing statistics.
+    Returns frames with importance segments and processing statistics.
     """
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
@@ -235,7 +235,6 @@ async def breakdown_vision(payload: VisionBreakdownRequest) -> AdaptiveSamplingR
         video_path=payload.video_path,
         project_id=project_id,
         max_frames=payload.max_frames,
-        upload_to_gcs=True,
     )
 
     # Convert to response model
@@ -243,8 +242,8 @@ async def breakdown_vision(payload: VisionBreakdownRequest) -> AdaptiveSamplingR
         project_id=project_id,
         frames=result["frames"],
         total_frames=len(result["frames"]),
-        pace_segments=[PaceSegment(**seg) for seg in result["pace_segments"]],
-        pace_statistics=PaceStatistics(**result["pace_statistics"]),
+        importance_segments=[ImportanceSegment(**seg) for seg in result["importance_segments"]],
+        importance_statistics=ImportanceStatistics(**result["importance_statistics"]),
         processing_stats=ProcessingStats(**result["processing_stats"]),
         summary=result["summary"],
     )
@@ -260,7 +259,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     Generate thumbnail using adaptive sampling + AI selection agent.
 
     Pipeline:
-    1. Adaptive sampling → Extract candidate frames based on pace
+    1. Adaptive sampling → Extract candidate frames based on moment importance
     2. Thumbnail selection agent → AI picks best frame with detailed reasoning
     3. Return selected frame + composition suggestions
 
@@ -276,10 +275,31 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     # Extract video path
     video_path = payload.content_sources.video_path
     if not video_path:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="video_path is required in content_sources",
-        )
+        # Image-only mode: allow callers to provide pre-extracted frames/screenshots.
+        # This keeps the API usable without running the heavy video pipeline.
+        image_paths = payload.content_sources.image_paths
+        if image_paths:
+            first = image_paths[0]
+            return ThumbnailResponse(
+                project_id=project_id,
+                status="draft",
+                recommended_title=payload.creative_brief.title_hint
+                or "ClickMoment Phase-1 (image-only)",
+                thumbnail_url=first,
+                selected_frame_url=first,
+                profile_variant_url=None,
+                layers=[],
+                advisory=None,
+                phase1=None,
+                total_frames_extracted=len(image_paths),
+                analysis_json_url=None,
+                cost_usd=None,
+                gemini_model=None,
+                summary=(
+                    "Image-only request received. "
+                    "Provide a video_path to enable adaptive sampling + Phase-1 moment diagnostics."
+                ),
+            )
 
     # ========================================================================
     # STEP 1: Adaptive Sampling - Extract candidate frames
@@ -289,11 +309,13 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     print(f"{'─'*70}")
     print(f"Video: {video_path}")
 
+    # Extract frames locally for processing
+    # Note: Frames are stored locally during the processing pipeline.
+    # Final selected thumbnails can be uploaded separately if needed.
     adaptive_result = await orchestrate_adaptive_sampling(
         video_path=video_path,
         project_id=project_id,
         max_frames=None,  # Auto-calculate based on video duration
-        upload_to_gcs=True,
     )
 
     candidate_frame_urls = adaptive_result["frames"]
@@ -323,35 +345,91 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         raise ValueError("No frames found in adaptive sampling analysis")
 
     # Transform extracted_frames to ThumbnailSelector format
-    visual_analysis_frames = analysis_data.get("visual_analysis", {}).get("sample_frames", [])
-
-    # Enrich extracted_frames with required fields
+    # Each extracted frame now has its own face_analysis (no longer sparse sampling!)
+    # CRITICAL: Ensure all frames have complete visual_analysis for scoring (aesthetics, psychology, etc.)
     enriched_frames = []
+    frames_skipped = 0
+    frames_with_incomplete_analysis = 0
+
     for idx, frame in enumerate(extracted_frames, 1):
         timestamp = frame.get("timestamp", 0.0)
 
-        # Get matching visual analysis (find closest)
-        closest_visual = (
-            min(
-                visual_analysis_frames,
-                key=lambda v: abs(v.get("timestamp", 0) - timestamp),
-                default={},
-            )
-            if visual_analysis_frames
-            else {}
-        )
+        # Get face analysis directly from this frame (analyzed during extraction)
+        face_analysis = frame.get("face_analysis", {})
+
+        # Get both local path (for Gemini) and GCS URL (for debugging)
+        local_path = frame.get("local_path", "")
+        gcs_url = frame.get("frame_path", "")
+
+        # Skip frames without local path (needed for Gemini)
+        if not local_path:
+            print(f"⚠️  Frame {idx}: missing local_path")
+            frames_skipped += 1
+            continue
+
+        # AUDIT: Verify local_path filename matches timestamp
+        # Expected format: frame_XXXXms.jpg where XXXX is timestamp in milliseconds
+        try:
+            filename = Path(local_path).name
+            if "_" in filename and "ms" in filename:
+                timestamp_from_filename_ms = int(filename.split("_")[1].split("ms")[0])
+                timestamp_from_filename_sec = timestamp_from_filename_ms / 1000.0
+                timestamp_diff = abs(timestamp_from_filename_sec - timestamp)
+
+                if timestamp_diff > 1.0:  # More than 1 second difference
+                    print(f"⚠️  [AUDIT] Frame {idx}: timestamp mismatch!")
+                    print(f"    Metadata timestamp: {timestamp:.2f}s")
+                    print(f"    Filename timestamp: {timestamp_from_filename_sec:.2f}s")
+                    print(f"    Difference: {timestamp_diff:.2f}s")
+                    print(f"    Path: {local_path}")
+        except Exception:
+            # Non-critical - just for debugging
+            pass
+
+        # Ensure visual_analysis has all required fields for scoring
+        # Required for: aesthetics, psychology, face_quality, composition, technical_quality, editability
+        required_visual_fields = {
+            "has_face": face_analysis.get("has_face", False),
+            "dominant_emotion": face_analysis.get("dominant_emotion", "unknown"),
+            "expression_intensity": face_analysis.get("expression_intensity", 0.0),
+            "eye_openness": face_analysis.get("eye_openness", 0.0),
+            "mouth_openness": face_analysis.get("mouth_openness", 0.0),
+            "head_pose": face_analysis.get("head_pose", {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}),
+        }
+
+        # Check if analysis is incomplete (missing required fields)
+        if not face_analysis or any(
+            key not in face_analysis for key in required_visual_fields.keys()
+        ):
+            frames_with_incomplete_analysis += 1
+            if frames_with_incomplete_analysis <= 3:  # Log first 3
+                print(f"⚠️  Frame {idx}: incomplete visual_analysis, filling defaults")
+
+        # Merge to ensure all required fields are present
+        complete_visual_analysis = {**face_analysis, **required_visual_fields}
+
+        # CRITICAL: Use timestamp-based frame number to maintain identity through pipeline
+        # This ensures frame_number stays tied to the actual frame, not loop position
+        frame_number_from_timestamp = int(timestamp * 30)  # Assume ~30fps for unique IDs
 
         enriched_frames.append(
             {
-                "frame_number": idx,
-                "path": frame.get("frame_path", ""),
-                "url": frame.get("frame_path", ""),  # Same as path for GCS
+                "frame_number": frame_number_from_timestamp,  # Timestamp-based unique ID
+                "local_path": local_path,  # Local path for Gemini (faster)
+                "url": gcs_url,  # GCS URL for debugging/reference
                 "timestamp": timestamp,
                 "moment_score": frame.get("moment_score", 0.0),
-                "pace_score": frame.get("pace_score", 0.0),
-                "visual_analysis": closest_visual.get("face_analysis", {}),
+                "importance_score": frame.get("importance_score", 0.0),
+                "importance_level": frame.get("importance_level", "unknown"),
+                "visual_analysis": complete_visual_analysis,  # Complete analysis for scoring
             }
         )
+
+    print("[API] Frame enrichment complete:")
+    print(f"  Total frames: {len(extracted_frames)}")
+    print(f"  Enriched frames: {len(enriched_frames)}")
+    print(f"  Skipped (no local_path): {frames_skipped}")
+    print(f"  Frames with incomplete analysis (filled): {frames_with_incomplete_analysis}")
 
     extracted_frames = enriched_frames
 
@@ -410,11 +488,15 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
             profile_variant_url=None,
             layers=[],
             advisory=None,
+            phase1=None,
             total_frames_extracted=len(candidate_frame_urls),
             analysis_json_url=adaptive_result.get("analysis_json_url"),
             cost_usd=None,
             gemini_model=None,
-            summary=f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. Set GEMINI_API_KEY to enable AI-powered thumbnail advisory with strategic options (safe/bold/avoid).",
+            summary=(
+                f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. "
+                "Set GEMINI_API_KEY to enable ClickMoment Phase-1 moment diagnostics."
+            ),
         )
 
     # Run selection agent
@@ -424,18 +506,15 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         channel_profile=selector_profile,
     )
 
-    # Extract advisory data from Gemini response
-    safe_option = selection_result.get("safe", {})
-    high_variance_option = selection_result.get("high_variance", {})
-    avoid_option = selection_result.get("avoid", {})
+    # Extract Phase-1 diagnostic data from Gemini response
+    moments = selection_result.get("moments", [])
     meta = selection_result.get("meta", {})
     debug_data = selection_result.get("debug", {})
 
-    print("✅ AI Advisory Generated")
+    print("✅ ClickMoment Phase-1 Insights Generated")
     print(f"📊 Confidence: {meta.get('confidence', 'unknown')}")
-    print(f"💡 Safe option: {safe_option.get('frame_id', 'N/A')}")
-    print(f"🎯 Bold option: {high_variance_option.get('frame_id', 'N/A')}")
-    print(f"⚠️  Avoid: {avoid_option.get('frame_id', 'N/A')}")
+    if moments:
+        print(f"✨ Top moment: {moments[0].get('frame_id', 'N/A')}")
 
     # ========================================================================
     # STEP 4: Build Response
@@ -444,84 +523,115 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     print("STEP 4: Building Response")
     print(f"{'─'*70}")
 
-    # Helper function to extract frame number and URL from frame_id
-    def get_frame_info(frame_id: str) -> tuple[int, str]:
-        """Extract frame number from 'Frame X' format."""
+    # Helper function to extract frame number, URL, and timestamp from frame_id
+    def get_frame_info(frame_id: str) -> tuple[int, str, str]:
+        """Extract frame number from 'Frame X' format and convert GCS URL to signed HTTP URL.
+
+        Returns:
+            Tuple of (frame_number, frame_url, timestamp_string)
+        """
+        from app.vision.extraction import generate_signed_url
+
         try:
             num = int(frame_id.replace("Frame", "").strip())
             # Find matching frame in extracted_frames
             if 0 < num <= len(extracted_frames):
                 frame = extracted_frames[num - 1]
-                return num, frame.get("url", "")
+                gcs_url = frame.get("url", "")
+                # Get actual timestamp from frame data (not from Gemini response)
+                frame_timestamp = frame.get("timestamp", 0.0)
+                timestamp_str = f"{frame_timestamp:.1f}s"
+                # Convert GCS URL to signed HTTP URL
+                if gcs_url.startswith("gs://"):
+                    return num, generate_signed_url(gcs_url), timestamp_str
+                return num, gcs_url, timestamp_str
         except (ValueError, IndexError):
             pass
-        return 1, extracted_frames[0].get("url", "") if extracted_frames else ""
 
-    # Build advisory with full data
-    from app.models.thumbnail import AdvisoryMeta, FrameOption, ThumbnailAdvisory
+        # Fallback to first frame
+        if extracted_frames:
+            gcs_url = extracted_frames[0].get("url", "")
+            frame_timestamp = extracted_frames[0].get("timestamp", 0.0)
+            timestamp_str = f"{frame_timestamp:.1f}s"
+            if gcs_url.startswith("gs://"):
+                return 1, generate_signed_url(gcs_url), timestamp_str
+            return 1, gcs_url, timestamp_str
+        return 1, "", "0.0s"
 
-    safe_num, safe_url = get_frame_info(safe_option.get("frame_id", "Frame 1"))
-    advisory = ThumbnailAdvisory(
-        safe=FrameOption(
-            frame_id=safe_option.get("frame_id", "Frame 1"),
-            frame_number=safe_num,
-            timestamp=safe_option.get("timestamp", "0.0s"),
-            frame_url=safe_url,
-            one_liner=safe_option.get("one_liner", ""),
-            reasons=safe_option.get("reasons", []),
-            risk_notes=safe_option.get("risk_notes", []),
-        ),
-        high_variance=FrameOption(
-            frame_id=high_variance_option.get("frame_id", "Frame 1"),
-            frame_number=get_frame_info(high_variance_option.get("frame_id", "Frame 1"))[0],
-            timestamp=high_variance_option.get("timestamp", "0.0s"),
-            frame_url=get_frame_info(high_variance_option.get("frame_id", "Frame 1"))[1],
-            one_liner=high_variance_option.get("one_liner", ""),
-            reasons=high_variance_option.get("reasons", []),
-            risk_notes=high_variance_option.get("risk_notes", []),
-        ),
-        avoid=FrameOption(
-            frame_id=avoid_option.get("frame_id", "Frame 1"),
-            frame_number=get_frame_info(avoid_option.get("frame_id", "Frame 1"))[0],
-            timestamp=avoid_option.get("timestamp", "0.0s"),
-            frame_url=get_frame_info(avoid_option.get("frame_id", "Frame 1"))[1],
-            one_liner=avoid_option.get("one_liner", ""),
-            reasons=avoid_option.get("reasons", []),
-            risk_notes=avoid_option.get("risk_notes", []),
-        ),
-        meta=AdvisoryMeta(
-            confidence=meta.get("confidence", "medium"),
-            what_changed=meta.get("what_changed", ""),
-            user_control_note=meta.get("user_control_note", ""),
-        ),
-        debug=debug_data,
+    # Build Phase-1 response model (diagnostic, non-prescriptive)
+    from app.models.thumbnail import ClickMomentPhase1, Phase1MomentInsight, Phase1Pillars
+
+    phase1_moments: list[Phase1MomentInsight] = []
+    for m in moments[:3]:
+        frame_id = m.get("frame_id", "Frame 1")
+        frame_num, frame_url, frame_timestamp = get_frame_info(frame_id)
+        pillars = m.get("pillars", {}) or {}
+
+        phase1_moments.append(
+            Phase1MomentInsight(
+                frame_id=frame_id,
+                frame_number=frame_num,
+                timestamp=frame_timestamp,  # Use actual timestamp from frame data, not Gemini's response
+                frame_url=frame_url,
+                moment_summary=m.get("moment_summary", ""),
+                viewer_feel=m.get("viewer_feel", ""),
+                why_this_reads=m.get("why_this_reads", []) or [],
+                optional_note=m.get("optional_note"),
+                pillars=Phase1Pillars(
+                    emotional_signal=pillars.get("emotional_signal", ""),
+                    curiosity_gap=pillars.get("curiosity_gap", ""),
+                    attention_signals=pillars.get("attention_signals", []) or [],
+                    readability_speed=pillars.get("readability_speed", ""),
+                ),
+            )
+        )
+
+    phase1 = ClickMomentPhase1(
+        moments=phase1_moments,
+        meta=meta if isinstance(meta, dict) else {},
+        debug=debug_data if isinstance(debug_data, dict) else {},
     )
 
-    # Build summary text
-    summary_parts = [
-        "✅ AI Thumbnail Advisory Generated",
-        f"\n\n📊 Confidence: {meta.get('confidence', 'medium').upper()}",
-        f"\n🎯 Total Frames Analyzed: {len(extracted_frames)}",
-        f"\n\n🛡️  SAFE OPTION (Frame {safe_num}):",
-        f"\n{safe_option.get('one_liner', '')}",
-        "\n\n🚀 BOLD OPTION:",
-        f"\n{high_variance_option.get('one_liner', '')}",
-        "\n\n⚠️  AVOID:",
-        f"\n{avoid_option.get('one_liner', '')}",
-        f"\n\n💡 {meta.get('user_control_note', 'You decide which option fits your vision best.')}",
+    # Choose a default thumbnail_url from the top moment (fallback to first extracted frame)
+    top_url = (
+        phase1_moments[0].frame_url
+        if phase1_moments
+        else (candidate_frame_urls[0] if candidate_frame_urls else None)
+    )
+
+    # Build summary text (Phase 1: observational)
+    summary_lines = [
+        "✅ ClickMoment Phase-1 moments surfaced",
+        f"🧭 Selection note: {meta.get('selection_note', 'n/a')}",
+        f"🎯 Total Frames Analyzed: {len(extracted_frames)}",
     ]
-    summary_text = "".join(summary_parts)
+    for mm in phase1_moments:
+        summary_lines.append(f"- {mm.frame_id}: {mm.moment_summary}")
+    summary_text = "\n".join(summary_lines)
+
+    # ========================================================================
+    # CLEANUP: Delete local frames after thumbnail selection
+    # ========================================================================
+    from app.analysis.adaptive_sampling import cleanup_local_frames
+
+    cleanup_local_frames(project_id)
 
     # Use safe option as default thumbnail_url
     return ThumbnailResponse(
         project_id=project_id,
         status="draft",
         recommended_title=payload.creative_brief.title_hint or "AI-Analyzed Thumbnail Options",
-        thumbnail_url=safe_url,
-        selected_frame_url=safe_url,
+        thumbnail_url=top_url
+        or (
+            candidate_frame_urls[0]
+            if candidate_frame_urls
+            else "https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=1200&q=80"
+        ),
+        selected_frame_url=top_url,
         profile_variant_url=None,
         layers=[],
-        advisory=advisory,
+        advisory=None,
+        phase1=phase1,
         total_frames_extracted=len(extracted_frames),
         analysis_json_url=adaptive_result.get("analysis_json_url"),
         cost_usd=selection_result.get("cost_usd"),
