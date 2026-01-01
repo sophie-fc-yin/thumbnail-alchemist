@@ -1,7 +1,7 @@
-"""Pace analysis for adaptive frame sampling.
+"""Moment importance analysis for adaptive frame sampling.
 
-Fuses multiple signals (facial expression, audio, speech) to calculate video pace.
-Higher pace = more frames needed to capture key moments.
+Fuses multiple signals (facial expression, audio, speech) to identify important moments.
+Higher importance = more frames needed around that moment to capture the best thumbnail.
 """
 
 from typing import Any
@@ -12,28 +12,28 @@ import numpy as np
 # CONSTANTS
 # ============================================================================
 
-# Pace Score Weights
+# Importance Score Weights
 DEFAULT_WEIGHT_EXPRESSION = 0.25  # Visual emotion (key for thumbnails)
 DEFAULT_WEIGHT_LANDMARK = 0.15  # Head movement, gestures
 DEFAULT_WEIGHT_AUDIO = 0.2  # Music, excitement
 DEFAULT_WEIGHT_SPEECH = 0.15  # Vocal emphasis
 DEFAULT_WEIGHT_AUDIO_SCORE = 0.25  # Comprehensive audio analysis
 
-# Pace Categorization Thresholds
-PACE_LOW_THRESHOLD = 0.3  # Below this = low pace
-PACE_MEDIUM_THRESHOLD = 0.7  # Below this = medium pace, above = high pace
+# Importance Categorization Thresholds
+IMPORTANCE_LOW_THRESHOLD = 0.3  # Below this = low importance
+IMPORTANCE_MEDIUM_THRESHOLD = 0.7  # Below this = medium, above = high
 
-# Sampling Intervals (seconds)
-DEFAULT_MIN_INTERVAL = 0.1  # Minimum sampling interval (high pace)
-DEFAULT_MAX_INTERVAL = 2.0  # Maximum sampling interval (low pace)
-LOW_PACE_MIN_INTERVAL = 1.5  # Low pace minimum interval
-LOW_PACE_MAX_INTERVAL = 2.0  # Low pace maximum interval
-MEDIUM_PACE_MIN_INTERVAL = 0.5  # Medium pace minimum interval
-MEDIUM_PACE_MAX_INTERVAL = 1.5  # Medium pace maximum interval
-HIGH_PACE_MAX_INTERVAL = 0.5  # High pace maximum interval
+# Sampling Intervals (seconds) - inverse of importance
+DEFAULT_MIN_INTERVAL = 0.1  # Minimum sampling interval (high importance)
+DEFAULT_MAX_INTERVAL = 2.0  # Maximum sampling interval (low importance)
+LOW_IMPORTANCE_MIN_INTERVAL = 1.5  # Low importance minimum interval
+LOW_IMPORTANCE_MAX_INTERVAL = 2.0  # Low importance maximum interval
+MEDIUM_IMPORTANCE_MIN_INTERVAL = 0.5  # Medium importance minimum interval
+MEDIUM_IMPORTANCE_MAX_INTERVAL = 1.5  # Medium importance maximum interval
+HIGH_IMPORTANCE_MAX_INTERVAL = 0.5  # High importance maximum interval
 
 # Segmentation
-DEFAULT_SEGMENTATION_THRESHOLD = 0.2  # Pace change threshold
+DEFAULT_SEGMENTATION_THRESHOLD = 0.2  # Importance change threshold
 
 # Signal Processing
 DEFAULT_SMOOTHING_WINDOW_SIZE = 5  # Window size for moving average
@@ -42,7 +42,7 @@ DEFAULT_SMOOTHING_WINDOW_SIZE = 5  # Window size for moving average
 MS_TO_SECONDS = 1000.0  # Milliseconds to seconds conversion factor
 
 
-def calculate_pace_score(
+def calculate_moment_importance(
     expression_delta: float = 0.0,
     landmark_motion: float = 0.0,
     audio_energy_delta: float = 0.0,
@@ -51,7 +51,7 @@ def calculate_pace_score(
     weights: dict[str, float] | None = None,
 ) -> float:
     """
-    Calculate pace score by fusing multiple signals.
+    Calculate moment importance by fusing multiple signals.
 
     This is NOT machine learning - it's signal fusion.
     Each signal is normalized to [0, 1] and weighted.
@@ -67,13 +67,13 @@ def calculate_pace_score(
             - landmark: 0.15 (head movement, gestures)
             - audio: 0.2 (catches music, excitement)
             - speech: 0.15 (vocal emphasis)
-            - audio_score: 0.25 (comprehensive audio analysis - NEW)
+            - audio_score: 0.25 (comprehensive audio analysis)
 
     Returns:
-        Pace score [0, 1] where:
-            - 0.0-0.3: Low pace (calm talking, slow scenes)
-            - 0.3-0.7: Medium pace (normal engagement)
-            - 0.7-1.0: High pace (emotional peaks, action)
+        Importance score [0, 1] where:
+            - 0.0-0.3: Low importance (calm talking, slow scenes)
+            - 0.3-0.7: Medium importance (normal engagement)
+            - 0.7-1.0: High importance (emotional peaks, reveals, hooks)
     """
     if weights is None:
         weights = {
@@ -81,11 +81,11 @@ def calculate_pace_score(
             "landmark": 0.15,
             "audio": 0.2,
             "speech": 0.15,
-            "audio_score": 0.25,  # New comprehensive audio signal
+            "audio_score": 0.25,  # Comprehensive audio signal
         }
 
     # Weighted sum
-    pace = (
+    importance = (
         weights["expression"] * expression_delta
         + weights["landmark"] * landmark_motion
         + weights["audio"] * audio_energy_delta
@@ -94,80 +94,80 @@ def calculate_pace_score(
     )
 
     # Clamp to [0, 1]
-    return float(min(max(pace, 0.0), 1.0))
+    return float(min(max(importance, 0.0), 1.0))
 
 
-def pace_to_sampling_interval(
-    pace_score: float,
+def importance_to_sampling_interval(
+    importance_score: float,
     min_interval: float = 0.1,
     max_interval: float = 2.0,
 ) -> float:
     """
-    Convert pace score to frame sampling interval.
+    Convert importance score to frame sampling interval.
 
     Adaptive rule:
-        - Low pace (0.0-0.3) → 1.5-2.0s intervals (few frames)
-        - Medium pace (0.3-0.7) → 0.5-1.0s intervals (normal density)
-        - High pace (0.7-1.0) → 0.1-0.25s intervals (dense capture)
+        - Low importance (0.0-0.3) → 1.5-2.0s intervals (few frames)
+        - Medium importance (0.3-0.7) → 0.5-1.0s intervals (normal density)
+        - High importance (0.7-1.0) → 0.1-0.25s intervals (dense capture)
 
-    This mirrors how humans scrub video - slow through calm parts,
-    dense sampling through emotional/action moments.
+    This mirrors how humans scrub video - skip through calm parts,
+    dense sampling around important moments (emotion reveals, hooks).
 
     Args:
-        pace_score: Pace score [0, 1]
+        importance_score: Importance score [0, 1]
         min_interval: Minimum sampling interval in seconds (default: 0.1s)
         max_interval: Maximum sampling interval in seconds (default: 2.0s)
 
     Returns:
         Sampling interval in seconds
     """
-    if pace_score < 0.3:
-        # Low pace: calm talking, slow scenes
-        # Linear interpolation: 1.5s → 2.0s as pace decreases
-        return 1.5 + (0.3 - pace_score) / 0.3 * 0.5
+    if importance_score < 0.3:
+        # Low importance: calm talking, slow scenes
+        # Linear interpolation: 1.5s → 2.0s as importance decreases
+        return 1.5 + (0.3 - importance_score) / 0.3 * 0.5
 
-    elif pace_score < 0.7:
-        # Medium pace: normal engagement
-        # Linear interpolation: 0.5s → 1.5s as pace decreases
-        return 0.5 + (0.7 - pace_score) / 0.4 * 1.0
+    elif importance_score < 0.7:
+        # Medium importance: normal engagement
+        # Linear interpolation: 0.5s → 1.5s as importance decreases
+        return 0.5 + (0.7 - importance_score) / 0.4 * 1.0
 
     else:
-        # High pace: emotional peaks, action
-        # Linear interpolation: 0.1s → 0.5s as pace decreases
-        return min_interval + (1.0 - pace_score) / 0.3 * 0.4
+        # High importance: emotional peaks, reveals, hooks
+        # Linear interpolation: 0.1s → 0.5s as importance decreases
+        return min_interval + (1.0 - importance_score) / 0.3 * 0.4
 
 
-def segment_video_by_pace(
-    pace_scores: list[float],
+def segment_video_by_importance(
+    importance_scores: list[float],
     timestamps: list[float],
     threshold: float = 0.2,
     video_duration: float | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Segment video into pace regions.
+    Segment video into importance regions.
 
-    Groups consecutive similar-pace sections together.
+    Groups consecutive similar-importance sections together.
     Important: Segment BEFORE sampling to avoid missing transitions.
 
     Args:
-        pace_scores: List of pace scores for each time point
+        importance_scores: List of importance scores for each time point
         timestamps: Corresponding timestamps in seconds
-        threshold: Pace change threshold to trigger new segment
+        threshold: Importance change threshold to trigger new segment
         video_duration: Total video duration (optional, for proper end time)
 
     Returns:
         List of segments with:
             - start_time: Segment start in seconds
             - end_time: Segment end in seconds
-            - avg_pace: Average pace score for segment
-            - pace_category: "low", "medium", or "high"
+            - avg_importance: Average importance score for segment
+            - importance_level: "low", "medium", or "high"
     """
-    if not pace_scores or not timestamps:
+    if not importance_scores or not timestamps:
         return []
 
     # Special case: very few samples - create full-duration segment
     if len(timestamps) <= 2:
-        avg_pace = float(np.mean(pace_scores))
+        avg_importance = float(np.mean(importance_scores))
         end_time = video_duration if video_duration else timestamps[-1]
         # Ensure minimum duration
         if end_time <= timestamps[0]:
@@ -177,43 +177,43 @@ def segment_video_by_pace(
             {
                 "start_time": timestamps[0],
                 "end_time": end_time,
-                "avg_pace": avg_pace,
-                "pace_category": _categorize_pace(avg_pace),
+                "avg_importance": avg_importance,
+                "importance_level": _categorize_importance(avg_importance),
             }
         ]
 
     segments = []
     current_start = timestamps[0]
-    current_paces = [pace_scores[0]]
+    current_scores = [importance_scores[0]]
 
-    for i in range(1, len(pace_scores)):
-        pace = pace_scores[i]
-        prev_pace = pace_scores[i - 1]
+    for i in range(1, len(importance_scores)):
+        score = importance_scores[i]
+        prev_score = importance_scores[i - 1]
 
-        # Check if pace changed significantly
-        if abs(pace - prev_pace) > threshold:
+        # Check if importance changed significantly
+        if abs(score - prev_score) > threshold:
             # End current segment at midpoint between samples
             midpoint = (timestamps[i - 1] + timestamps[i]) / 2.0
-            avg_pace = float(np.mean(current_paces))
+            avg_importance = float(np.mean(current_scores))
             segments.append(
                 {
                     "start_time": current_start,
                     "end_time": midpoint,
-                    "avg_pace": avg_pace,
-                    "pace_category": _categorize_pace(avg_pace),
+                    "avg_importance": avg_importance,
+                    "importance_level": _categorize_importance(avg_importance),
                 }
             )
 
             # Start new segment at midpoint
             current_start = midpoint
-            current_paces = [pace]
+            current_scores = [score]
         else:
             # Continue current segment
-            current_paces.append(pace)
+            current_scores.append(score)
 
     # Add final segment - extend to video duration if available
-    if current_paces:
-        avg_pace = float(np.mean(current_paces))
+    if current_scores:
+        avg_importance = float(np.mean(current_scores))
         end_time = video_duration if video_duration else timestamps[-1]
         # Ensure end_time is after start
         if end_time <= current_start:
@@ -223,19 +223,19 @@ def segment_video_by_pace(
             {
                 "start_time": current_start,
                 "end_time": end_time,
-                "avg_pace": avg_pace,
-                "pace_category": _categorize_pace(avg_pace),
+                "avg_importance": avg_importance,
+                "importance_level": _categorize_importance(avg_importance),
             }
         )
 
     return segments
 
 
-def _categorize_pace(pace_score: float) -> str:
-    """Categorize pace score into low/medium/high."""
-    if pace_score < 0.3:
+def _categorize_importance(importance_score: float) -> str:
+    """Categorize importance score into low/medium/high."""
+    if importance_score < 0.3:
         return "low"
-    elif pace_score < 0.7:
+    elif importance_score < 0.7:
         return "medium"
     else:
         return "high"

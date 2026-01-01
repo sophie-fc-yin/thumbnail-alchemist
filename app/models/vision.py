@@ -53,23 +53,23 @@ class FrameScore(BaseModel):
     rank: int
 
 
-class PaceSegment(BaseModel):
-    """Pace segment information."""
+class ImportanceSegment(BaseModel):
+    """Moment importance segment information."""
 
     start_time: float = Field(..., description="Segment start in seconds")
     end_time: float = Field(..., description="Segment end in seconds")
-    avg_pace: float = Field(..., description="Average pace score [0, 1]")
-    pace_category: str = Field(..., description="Pace category: low, medium, or high")
+    avg_importance: float = Field(..., description="Average importance score [0, 1]")
+    importance_level: str = Field(..., description="Importance level: low, medium, or high")
 
 
-class PaceStatistics(BaseModel):
-    """Overall pace statistics."""
+class ImportanceStatistics(BaseModel):
+    """Overall moment importance statistics."""
 
-    avg_pace: float = Field(..., description="Average pace across all segments")
+    avg_importance: float = Field(..., description="Average importance across all segments")
     segment_counts: dict[str, int] = Field(
-        ..., description="Count of low/medium/high pace segments"
+        ..., description="Count of low/medium/high importance segments"
     )
-    total_segments: int = Field(..., description="Total number of pace segments")
+    total_segments: int = Field(..., description="Total number of importance segments")
 
 
 class ProcessingStats(BaseModel):
@@ -78,7 +78,9 @@ class ProcessingStats(BaseModel):
     audio_time: float = Field(..., description="Audio analysis time in seconds")
     initial_sampling_time: float = Field(..., description="Initial frame sampling time in seconds")
     face_analysis_time: float = Field(..., description="Face analysis time in seconds")
-    pace_calculation_time: float = Field(..., description="Pace calculation time in seconds")
+    importance_calculation_time: float = Field(
+        ..., description="Moment importance calculation time in seconds"
+    )
     adaptive_extraction_time: float = Field(
         ..., description="Adaptive frame extraction time in seconds"
     )
@@ -96,12 +98,16 @@ class VisionBreakdownResponse(BaseModel):
 
 
 class AdaptiveSamplingResponse(BaseModel):
-    """Response from adaptive sampling endpoint with pace analysis."""
+    """Response from adaptive sampling endpoint with moment importance analysis."""
 
     project_id: str
     frames: list[str] = Field(..., description="List of frame paths (GCS URLs or local)")
     total_frames: int = Field(..., description="Total number of frames extracted")
-    pace_segments: list[PaceSegment] = Field(..., description="Video segments grouped by pace")
-    pace_statistics: PaceStatistics = Field(..., description="Overall pace statistics")
+    importance_segments: list[ImportanceSegment] = Field(
+        ..., description="Video segments grouped by moment importance"
+    )
+    importance_statistics: ImportanceStatistics = Field(
+        ..., description="Overall importance statistics"
+    )
     processing_stats: ProcessingStats = Field(..., description="Processing time breakdown")
     summary: str = Field(..., description="Human-readable summary")

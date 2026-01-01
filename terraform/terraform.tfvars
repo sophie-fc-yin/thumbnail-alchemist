@@ -19,7 +19,7 @@ max_instances              = 10
 
 # Storage Configuration
 storage_bucket_name = "clickmoment-prod-assets"
-storage_location    = "US"
+storage_location    = "US-WEST1"  # Matches existing bucket location (cannot be changed)
 enable_versioning   = false
 
 # CORS Configuration
@@ -28,3 +28,6 @@ cors_allowed_origins = [
   "http://localhost:3000",
   "http://localhost:8000",
 ]
+
+# API Keys are managed via Google Cloud Secret Manager
+# See terraform/iam.tf for secret access permissions

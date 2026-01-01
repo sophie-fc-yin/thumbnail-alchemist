@@ -11,8 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from google.cloud import storage
-
 
 def build_comprehensive_analysis_json(
     project_id: str,
@@ -22,8 +20,8 @@ def build_comprehensive_analysis_json(
     visual_analysis: list[dict[str, Any]],
     merged_timeline: list[dict[str, Any]],
     extracted_frames: list[dict[str, Any]],
-    pace_segments: list[dict[str, Any]],
-    pace_statistics: dict[str, Any],
+    importance_segments: list[dict[str, Any]],
+    importance_statistics: dict[str, Any],
     processing_stats: dict[str, Any],
     audio_features: dict[str, Any] | None = None,
     transcript_data: dict[str, Any] | None = None,
@@ -39,8 +37,8 @@ def build_comprehensive_analysis_json(
         visual_analysis: Face analysis results for each sample frame
         merged_timeline: Combined timeline from all streams
         extracted_frames: Final extracted frames with metadata
-        pace_segments: Pace segmentation results
-        pace_statistics: Pace statistics summary
+        importance_segments: Moment importance segmentation results
+        importance_statistics: Moment importance statistics summary
         processing_stats: Processing time statistics
         audio_features: Raw audio features (optional)
         transcript_data: Transcription data (optional)
@@ -99,10 +97,10 @@ def build_comprehensive_analysis_json(
         "merged_timeline": merged_timeline,
         # Final Extracted Frames
         "extracted_frames": extracted_frames,
-        # Pace Analysis (current method)
-        "pace_analysis": {
-            "segments": pace_segments,
-            "statistics": pace_statistics,
+        # Moment Importance Analysis
+        "importance_analysis": {
+            "segments": importance_segments,
+            "statistics": importance_statistics,
         },
         # Processing Statistics
         "processing_stats": processing_stats,
@@ -136,6 +134,8 @@ async def save_analysis_json_to_gcs(
         json_str = json.dumps(analysis_json, indent=2, ensure_ascii=False)
 
         # Upload to GCS
+        from google.cloud import storage  # type: ignore
+
         client = storage.Client()
         bucket = client.bucket(bucket_name)
 
@@ -156,12 +156,13 @@ async def save_analysis_json_to_gcs(
         blob.patch()
 
         gcs_url = f"gs://{bucket_name}/{blob_path}"
-        print(f"[Analysis Output] Saved comprehensive analysis to {gcs_url}")
+        print(f"[Analysis Output] ✅ Saved comprehensive analysis to {gcs_url}")
 
         return gcs_url
 
     except Exception as e:
-        print(f"[Analysis Output] Failed to save analysis JSON: {e}")
+        print(f"[Analysis Output] ❌ Failed to save analysis JSON to GCS: {e}")
+        print(f"[Analysis Output] Check permissions: gsutil iam get gs://{bucket_name}")
         # Fallback: save locally
         try:
             local_path = Path(f"analysis_{project_id}.json")

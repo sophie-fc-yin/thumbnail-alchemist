@@ -11,7 +11,6 @@ import librosa
 import numpy as np
 from openai import OpenAI
 
-from app.audio.speech_detection import detect_speech_in_audio
 from app.models import SourceMedia
 from app.vision.extraction import MediaValidationError, generate_signed_url
 
@@ -231,6 +230,8 @@ async def extract_audio_from_video(
 
     # STEP 2: Detect speech segments and create speech-only lane
     try:
+        from app.audio.speech_detection import detect_speech_in_audio
+
         speech_result = detect_speech_in_audio(
             audio_path=full_audio_path,
             output_speech_path=speech_path,

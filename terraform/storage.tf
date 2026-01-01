@@ -8,9 +8,7 @@ resource "google_storage_bucket" "clickmoment_prod_assets" {
   force_destroy = false # Prevent accidental deletion of production data
 
   # Uniform bucket-level access (recommended for new buckets)
-  uniform_bucket_level_access {
-    enabled = true
-  }
+  uniform_bucket_level_access = true
 
   # CORS configuration to allow uploads from frontend
   cors {

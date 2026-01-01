@@ -36,8 +36,8 @@ from app.models.upload import (
 from app.models.vision import (
     AdaptiveSamplingResponse,
     FrameScore,
-    PaceSegment,
-    PaceStatistics,
+    ImportanceSegment,
+    ImportanceStatistics,
     ProcessingStats,
     VisionBreakdownRequest,
     VisionBreakdownResponse,
@@ -52,8 +52,8 @@ __all__ = [
     # Vision
     "AdaptiveSamplingResponse",
     "FrameScore",
-    "PaceSegment",
-    "PaceStatistics",
+    "ImportanceSegment",
+    "ImportanceStatistics",
     "ProcessingStats",
     "VisionBreakdownRequest",
     "VisionBreakdownResponse",

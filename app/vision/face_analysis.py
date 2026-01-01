@@ -52,9 +52,8 @@ class FaceExpressionAnalyzer:
 
         self.face_landmarker = vision.FaceLandmarker.create_from_options(options)
 
-        # Download FER+ model from HuggingFace if not provided
+        # Load FER+ model (download if not cached)
         if model_path is None:
-            print("Downloading FER+ ONNX model...")
             model_dir_fer = Path.home() / ".cache" / "ferplus"
             model_dir_fer.mkdir(parents=True, exist_ok=True)
             model_path = model_dir_fer / "emotion-ferplus-8.onnx"
@@ -63,9 +62,12 @@ class FaceExpressionAnalyzer:
                 # Download from ONNX Model Zoo
                 import urllib.request
 
+                print("Downloading FER+ ONNX model (~50MB)...")
                 url = "https://github.com/onnx/models/raw/main/validated/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
                 urllib.request.urlretrieve(url, str(model_path))
-                print(f"Downloaded FER+ model to {model_path}")
+                print(f"✓ Downloaded FER+ model to {model_path}")
+            else:
+                print(f"✓ Using cached FER+ model from {model_path}")
 
         # Load FER+ emotion model
         self.emotion_model = ort.InferenceSession(
@@ -142,6 +144,12 @@ class FaceExpressionAnalyzer:
         # This is 1 - P(neutral), measuring "how much is happening"
         expression_intensity = 1.0 - emotion_probs.get("neutral", 0.5)
 
+        # Determine dominant emotion (highest probability)
+        if emotion_probs:
+            dominant_emotion = max(emotion_probs.items(), key=lambda x: x[1])[0]
+        else:
+            dominant_emotion = "neutral"
+
         # Convert landmarks to list for motion tracking
         # New API: landmarks is a list of NormalizedLandmark objects
         landmark_coords = [(lm.x, lm.y, lm.z) for lm in landmarks]
@@ -149,6 +157,7 @@ class FaceExpressionAnalyzer:
         return {
             "has_face": True,
             "expression_intensity": float(expression_intensity),
+            "dominant_emotion": dominant_emotion,  # Add missing field!
             "eye_openness": float(eye_openness),
             "mouth_openness": float(mouth_openness),
             "head_pose": head_pose,
@@ -161,6 +170,7 @@ class FaceExpressionAnalyzer:
         return {
             "has_face": False,
             "expression_intensity": 0.0,
+            "dominant_emotion": "unknown",  # Add missing field!
             "eye_openness": 0.0,
             "mouth_openness": 0.0,
             "head_pose": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0},

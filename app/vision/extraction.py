@@ -4,8 +4,6 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from google.cloud import storage
-
 from app.models import SourceMedia
 
 
@@ -66,6 +64,11 @@ def generate_signed_url(
     bucket_name, blob_name = parsed
 
     try:
+        import google.auth
+        from google.auth import compute_engine
+        from google.auth.transport import requests
+        from google.cloud import storage  # type: ignore
+
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
@@ -77,12 +80,31 @@ def generate_signed_url(
                 "The file may not have been uploaded successfully, or there may be a delay in GCS availability."
             )
 
-        # Generate signed URL valid for specified duration
-        signed_url = blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(minutes=expiration_minutes),
-            method="GET",
-        )
+        # Get credentials and check if we need to use IAM signing
+        credentials, project = google.auth.default()
+
+        # If using compute engine credentials (no private key), use IAM-based signing
+        if isinstance(credentials, compute_engine.Credentials):
+            # Get the service account email from the metadata server
+            auth_request = requests.Request()
+            credentials.refresh(auth_request)
+            service_account_email = credentials.service_account_email
+
+            # Generate signed URL using IAM (no private key needed)
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(minutes=expiration_minutes),
+                method="GET",
+                service_account_email=service_account_email,
+                access_token=credentials.token,
+            )
+        else:
+            # Use regular signing with private key
+            signed_url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(minutes=expiration_minutes),
+                method="GET",
+            )
 
         return signed_url
 

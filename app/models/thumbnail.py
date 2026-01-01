@@ -172,6 +172,10 @@ class FrameDebugInfo(BaseModel):
     frame_id: str
     timestamp: str
     total_score: float
+    moment_importance: float = Field(
+        0.0,
+        description="Phase-1 moment importance score derived from adaptive sampling (audio+visual saliency).",
+    )
     aesthetic: float
     psychology: float
     editability: float
@@ -204,6 +208,71 @@ class ThumbnailAdvisory(BaseModel):
     )
 
 
+class Phase1Pillars(BaseModel):
+    """Phase-1 diagnostic pillars (observational, non-prescriptive)."""
+
+    emotional_signal: str = Field(
+        ...,
+        description="What emotional signal is visible and how clearly it reads at a glance.",
+    )
+    curiosity_gap: str = Field(
+        ...,
+        description="Whether the frame hints at an outcome without resolving it (aligned to title/topic).",
+    )
+    attention_signals: list[str] = Field(
+        default_factory=list,
+        description="Observed attention signals present in the frame (e.g., face, number, symbol, motion, contrast).",
+    )
+    readability_speed: str = Field(
+        ...,
+        description="Whether it survives a small-screen, ~2-second scan (single focal point, separation, instant recognizability).",
+    )
+
+
+class Phase1MomentInsight(BaseModel):
+    """A single ClickMoment candidate moment with Phase-1 diagnostic insight."""
+
+    frame_id: str = Field(..., description="Frame identifier (e.g., 'Frame 3')")
+    frame_number: int = Field(..., description="Frame index number")
+    timestamp: str = Field(..., description="Timestamp in video (e.g., '5.2s')")
+    frame_url: Optional[HttpUrl] = Field(None, description="URL to frame image")
+
+    moment_summary: str = Field(
+        ..., description="Short, observational summary of what the frame shows (max ~18 words)."
+    )
+    viewer_feel: str = Field(
+        ...,
+        description="What a viewer likely feels at a glance (fast, emotional, non-technical).",
+    )
+    why_this_reads: list[str] = Field(
+        default_factory=list,
+        description="Flattened, user-facing reasons (observational) drawn from the four pillars.",
+    )
+    optional_note: Optional[str] = Field(
+        None,
+        description="Optional nuance (e.g., if capture is weak, recreating the same moment may help).",
+    )
+    pillars: Phase1Pillars
+
+
+class ClickMomentPhase1(BaseModel):
+    """Phase-1 output: diagnostic (not prescriptive) clickable-moment surfacing."""
+
+    positioning: str = Field(
+        "ClickMoment identifies moments in your video that are already psychologically ready to earn clicks.",
+        description="Core positioning statement shown to users.",
+    )
+    moments: list[Phase1MomentInsight] = Field(
+        default_factory=list,
+        description="Top moments (ordered, not numbered/ranked in copy).",
+    )
+    meta: dict = Field(default_factory=dict, description="Optional metadata (confidence, notes).")
+    debug: dict = Field(
+        default_factory=dict,
+        description="Debug data including all_frames_scored and scoring_notes (developer-facing).",
+    )
+
+
 class ThumbnailResponse(BaseModel):
     """Response from thumbnail generation endpoint with AI advisory."""
 
@@ -220,6 +289,10 @@ class ThumbnailResponse(BaseModel):
     # New advisory data
     advisory: Optional[ThumbnailAdvisory] = Field(
         None, description="AI strategic options (safe/bold/avoid)"
+    )
+    phase1: Optional[ClickMomentPhase1] = Field(
+        None,
+        description="Phase-1 ClickMoment diagnostic insights (observational, non-prescriptive).",
     )
 
     # Processing metadata

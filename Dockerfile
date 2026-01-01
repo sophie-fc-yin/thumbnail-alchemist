@@ -19,6 +19,12 @@ COPY pyproject.toml uv.lock README.md ./
 # Install Python dependencies
 RUN uv sync --frozen --no-dev
 
+# Copy model download script
+COPY scripts/download_models.py scripts/
+
+# Pre-download ML models during build (bakes into image)
+RUN uv run python scripts/download_models.py
+
 # Copy application code
 COPY . .
 

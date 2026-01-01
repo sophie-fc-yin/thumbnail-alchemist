@@ -1,13 +1,21 @@
-"""Test script to validate audio media processing with GCS URLs."""
+"""Integration script (skipped in unit test runs).
 
-import asyncio
+This file uses real media URLs, cloud credentials, and external models.
+It is not suitable for CI/unit test environments.
+"""
 
-from app.audio_media import (
+import pytest
+
+pytest.skip("integration-only test; skipped in unit test runs", allow_module_level=True)
+
+import asyncio  # noqa: E402
+
+from app.audio_media import (  # noqa: E402
     analyze_audio_features,
     extract_audio_from_video,
     transcribe_and_analyze_audio,
 )
-from app.models import SourceMedia
+from app.models import SourceMedia  # noqa: E402
 
 
 async def test_audio_media_processing():

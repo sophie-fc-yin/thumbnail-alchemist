@@ -1,15 +1,28 @@
 """Google Cloud Storage utilities for file uploads."""
 
 from datetime import timedelta
-
-from google.api_core import exceptions as gcs_exceptions
-from google.cloud import storage
+from typing import Any
 
 
 class StorageError(Exception):
     """Raised when storage operations fail."""
 
     pass
+
+
+def _get_storage_client() -> Any:
+    """
+    Lazily import and create a google.cloud.storage client.
+
+    This keeps module import lightweight (important for tests and environments
+    where GCS credentials/SSL trust store are unavailable).
+    """
+    try:
+        from google.cloud import storage  # type: ignore
+
+        return storage.Client()
+    except Exception as e:  # pragma: no cover - depends on runtime env
+        raise StorageError(f"Google Cloud Storage client unavailable: {e}") from e
 
 
 def check_blob_exists(bucket_name: str, blob_path: str) -> bool:
@@ -24,7 +37,7 @@ def check_blob_exists(bucket_name: str, blob_path: str) -> bool:
         True if blob exists, False otherwise
     """
     try:
-        client = storage.Client()
+        client = _get_storage_client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         return blob.exists()
@@ -58,7 +71,7 @@ async def upload_file_to_gcs(
         StorageError: If upload fails
     """
     try:
-        client = storage.Client()
+        client = _get_storage_client()
         bucket = client.bucket(bucket_name)
 
         # Construct path: users/{user_id}/videos/{filename}
@@ -86,13 +99,12 @@ async def upload_file_to_gcs(
 
         return gcs_url, file_exists
 
-    except gcs_exceptions.GoogleAPIError as e:
+    except Exception as e:
+        # google.api_core exceptions can vary by environment; keep catch broad.
         raise StorageError(f"GCS upload failed: {str(e)}") from e
     except StorageError:
         # Re-raise StorageError as-is
         raise
-    except Exception as e:
-        raise StorageError(f"Unexpected upload error: {str(e)}") from e
 
 
 def generate_signed_upload_url(
@@ -127,7 +139,7 @@ def generate_signed_upload_url(
         from google.auth import compute_engine
         from google.auth.transport import requests
 
-        client = storage.Client()
+        client = _get_storage_client()
         bucket = client.bucket(bucket_name)
 
         # Construct path: users/{user_id}/videos/{filename}
@@ -167,8 +179,6 @@ def generate_signed_upload_url(
 
         return signed_url, gcs_path
 
-    except gcs_exceptions.GoogleAPIError as e:
-        raise StorageError(f"Failed to generate signed URL: {str(e)}") from e
     except Exception as e:
         raise StorageError(f"Unexpected error generating signed URL: {str(e)}") from e
 
@@ -207,7 +217,7 @@ def generate_signed_download_url(
             # Use provided bucket_name and treat gcs_path as blob path
             blob_path = gcs_path
 
-        client = storage.Client()
+        client = _get_storage_client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
 
@@ -246,7 +256,5 @@ def generate_signed_download_url(
     except StorageError:
         # Re-raise StorageError as-is
         raise
-    except gcs_exceptions.GoogleAPIError as e:
-        raise StorageError(f"Failed to generate signed URL: {str(e)}") from e
     except Exception as e:
         raise StorageError(f"Unexpected error generating signed URL: {str(e)}") from e

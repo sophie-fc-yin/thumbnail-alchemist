@@ -553,9 +553,22 @@ class ContextualScoringCriteria:
         # Overall weighted score
         overall_score = sum(cat["score"] * cat["weight"] for cat in category_scores.values())
 
+        # CRITICAL: Apply brightness penalty for dark/overexposed frames
+        # Dark frames are unusable for thumbnails regardless of other qualities
+        image_quality = frame_features.get("image_quality", {})
+        if image_quality.get("is_too_dark"):
+            # Severe penalty for dark frames
+            brightness_penalty = 0.4  # Reduce score by 40%
+            overall_score *= 1.0 - brightness_penalty
+        elif image_quality.get("is_too_bright"):
+            # Moderate penalty for overexposed frames
+            overall_score *= 0.8
+
         return {
             "overall_score": overall_score,
             "category_scores": category_scores,
+            "brightness_penalty_applied": image_quality.get("is_too_dark")
+            or image_quality.get("is_too_bright"),
         }
 
     @classmethod

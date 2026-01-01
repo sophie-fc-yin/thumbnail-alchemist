@@ -312,29 +312,37 @@ async def analyze_narrative_context(
         timestamped_transcript += f"[{start_time:.1f}s] {text}\n"
 
     # Create LLM prompt
-    prompt = f"""Analyze this video transcript and identify the most important narrative moments for creating a compelling thumbnail.
+    prompt = f"""You are analyzing a video transcript to identify important narrative moments. You MUST follow these rules STRICTLY:
+
+1. ONLY use EXACT quotes from the transcript below - do NOT paraphrase, summarize, or create new text
+2. The "text" field MUST be a word-for-word copy from the transcript
+3. If you cannot find compelling moments, return an empty array: []
+4. DO NOT make up generic examples or placeholder text
+5. Every quote you return will be validated against the original transcript
 
 Transcript:
 {timestamped_transcript}
 
-Identify moments that are:
-1. Hook statements (surprising, intriguing, attention-grabbing)
-2. Emotional peaks (excitement, tension, revelation)
-3. Story beats (key turning points)
-4. Important reveals or information
+Task: Identify moments that are genuinely compelling for a thumbnail:
+- Hook statements (surprising, intriguing, attention-grabbing)
+- Emotional peaks (excitement, tension, revelation)
+- Story beats (key turning points)
+- Important reveals or information
 
-For each moment, provide:
-- Timestamp (in seconds)
-- Type (hook_statement, emotional_peak, story_beat, reveal)
-- Importance score (0.0-1.0)
-- Quote (exact text)
-- Reason (why this moment matters)
+For each moment provide:
+- time: Timestamp in seconds (float)
+- type: One of: "hook_statement", "emotional_peak", "story_beat", "reveal"
+- importance: Score 0.0-1.0 based on how compelling this moment is
+- text: EXACT QUOTE from the transcript (word-for-word, no changes)
+- reason: Brief explanation of why this specific moment matters
 
-Return ONLY valid JSON in this exact format (no markdown, no code blocks):
+Return ONLY valid JSON (no markdown, no code blocks, no explanations):
 [
-  {{"time": 5.2, "type": "hook_statement", "importance": 0.9, "text": "quote here", "reason": "why it matters"}},
-  {{"time": 15.8, "type": "emotional_peak", "importance": 0.85, "text": "quote here", "reason": "why it matters"}}
-]"""
+  {{"time": 5.2, "type": "hook_statement", "importance": 0.9, "text": "exact quote from transcript", "reason": "why it matters"}},
+  {{"time": 15.8, "type": "emotional_peak", "importance": 0.85, "text": "exact quote from transcript", "reason": "why it matters"}}
+]
+
+If no compelling moments exist, return: []"""
 
     try:
         client = OpenAI(
@@ -347,11 +355,11 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert at analyzing video transcripts to identify the most compelling moments for thumbnails. Return only valid JSON.",
+                    "content": "You are an expert at analyzing video transcripts to identify compelling moments. You MUST use exact quotes from the transcript - never paraphrase or create text. All quotes will be validated. Return only valid JSON.",
                 },
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.3,  # Lower temperature for more consistent output
+            temperature=0.1,  # Very low temperature to reduce hallucination
         )
 
         # Parse response
@@ -366,9 +374,33 @@ Return ONLY valid JSON in this exact format (no markdown, no code blocks):
 
         narrative_moments = json.loads(result_text)
 
-        print(f"[Stream A] Identified {len(narrative_moments)} narrative moments via LLM")
+        # VALIDATION: Verify all quotes actually exist in the transcript
+        validated_moments = []
+        full_transcript_text = " ".join([seg.get("text", "") for seg in segments])
 
-        return narrative_moments
+        for moment in narrative_moments:
+            quote = moment.get("text", "").strip()
+
+            # Check if quote exists in transcript (allow some whitespace flexibility)
+            if quote and quote in full_transcript_text:
+                validated_moments.append(moment)
+            else:
+                # Try to find it with normalized whitespace
+                normalized_quote = " ".join(quote.split())
+                normalized_transcript = " ".join(full_transcript_text.split())
+
+                if normalized_quote in normalized_transcript:
+                    validated_moments.append(moment)
+                else:
+                    print(f"[Stream A] WARNING: Rejected hallucinated quote: '{quote[:50]}...'")
+
+        rejected_count = len(narrative_moments) - len(validated_moments)
+        if rejected_count > 0:
+            print(f"[Stream A] Rejected {rejected_count} hallucinated quotes")
+
+        print(f"[Stream A] Identified {len(validated_moments)} validated narrative moments via LLM")
+
+        return validated_moments
 
     except Exception as e:
         print(f"[Stream A] Failed to analyze narrative context: {e}")

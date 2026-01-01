@@ -41,11 +41,32 @@ resource "google_cloud_run_v2_service" "thumbnail_alchemist" {
         }
       }
 
-      # Environment variables (if needed)
-      # env {
-      #   name  = "ENVIRONMENT"
-      #   value = var.environment
-      # }
+      # Environment variables
+      env {
+        name  = "ENVIRONMENT"
+        value = var.environment
+      }
+
+      # Mount secrets from Secret Manager
+      env {
+        name = "OPENAI_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = "OPENAI_API_KEY"
+            version = "latest"
+          }
+        }
+      }
+
+      env {
+        name = "GEMINI_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = "GEMINI_API_KEY"
+            version = "latest"
+          }
+        }
+      }
     }
 
     # Scaling configuration
