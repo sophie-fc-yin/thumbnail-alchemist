@@ -6,15 +6,15 @@ Handles audio extraction, speech detection, saliency analysis, and semantics.
 from app.audio.extraction import (
     analyze_audio_features,
     extract_audio_from_video,
-    transcribe_and_analyze_audio,
+    transcribe_speech_audio,
 )
 from app.audio.saliency import detect_audio_saliency
-from app.audio.speech_semantics import analyze_speech_semantics
+from app.audio.speech_semantics import analyze_speech
 
 __all__ = [
     "extract_audio_from_video",
-    "transcribe_and_analyze_audio",
+    "transcribe_speech_audio",
     "analyze_audio_features",
     "detect_audio_saliency",
-    "analyze_speech_semantics",
+    "analyze_speech",
 ]

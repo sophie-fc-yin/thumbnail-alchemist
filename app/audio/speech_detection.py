@@ -14,8 +14,19 @@ from typing import Any
 
 import librosa
 import numpy as np
+import soundfile as sf
 import torch
 import torchaudio
+
+from app.constants import (
+    DEFAULT_SAMPLE_RATE,
+    MIN_PITCH_ANALYSIS_DURATION_MS,
+    PITCH_ANALYSIS_FMAX,
+    PITCH_ANALYSIS_FMIN,
+    VAD_MIN_SILENCE_DURATION_MS,
+    VAD_MIN_SPEECH_DURATION_MS,
+    VAD_SPEECH_PAD_MS,
+)
 
 
 class SpeechDetector:
@@ -44,61 +55,47 @@ class SpeechDetector:
     def detect_speech_segments(
         self,
         audio_path: Path | str,
-        min_speech_duration_ms: int = 250,
-        min_silence_duration_ms: int = 100,
-        speech_pad_ms: int = 30,
     ) -> list[dict[str, float]]:
         """
         Detect speech segments in audio file.
 
         Args:
             audio_path: Path to audio file (WAV format)
-            min_speech_duration_ms: Minimum speech segment duration in ms
-            min_silence_duration_ms: Minimum silence duration between segments in ms
-            speech_pad_ms: Padding to add around detected speech in ms
 
         Returns:
             List of speech segments with start/end times in seconds:
             [
-                {"start": 0.5, "end": 3.2, "confidence": 0.95},
-                {"start": 5.1, "end": 8.7, "confidence": 0.88},
+                {"start": 0.5, "end": 3.2},
+                {"start": 5.1, "end": 8.7},
             ]
         """
-        # Load audio
-        wav, sample_rate = torchaudio.load(str(audio_path))
+        # Load audio - always resample to target sample rate for consistency
+        wav, file_sample_rate = torchaudio.load(str(audio_path))
 
-        # Silero VAD expects 16kHz mono
-        if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
+        # Silero VAD expects 16kHz mono - always resample to ensure consistency
+        if file_sample_rate != DEFAULT_SAMPLE_RATE:
+            resampler = torchaudio.transforms.Resample(file_sample_rate, DEFAULT_SAMPLE_RATE)
             wav = resampler(wav)
-            sample_rate = 16000
+
+        sample_rate = DEFAULT_SAMPLE_RATE  # Always use target sample rate
 
         # Convert to mono if stereo
         if wav.shape[0] > 1:
             wav = torch.mean(wav, dim=0, keepdim=True)
 
-        # Get speech timestamps
+        # Get speech timestamps using configurable VAD parameters
         speech_timestamps = self.get_speech_timestamps(
             wav.squeeze(),
             self.model,
             sampling_rate=sample_rate,
-            min_speech_duration_ms=min_speech_duration_ms,
-            min_silence_duration_ms=min_silence_duration_ms,
-            speech_pad_ms=speech_pad_ms,
-            return_seconds=False,  # Get sample indices
+            min_speech_duration_ms=VAD_MIN_SPEECH_DURATION_MS,
+            min_silence_duration_ms=VAD_MIN_SILENCE_DURATION_MS,
+            speech_pad_ms=VAD_SPEECH_PAD_MS,
+            return_seconds=True,
         )
 
-        # Convert to seconds and add confidence
-        segments = []
-        for ts in speech_timestamps:
-            segment = {
-                "start": ts["start"] / sample_rate,
-                "end": ts["end"] / sample_rate,
-                "confidence": 0.9,  # Silero VAD doesn't return confidence, use default
-            }
-            segments.append(segment)
-
-        return segments
+        # Silero VAD already returns timestamps in seconds with start/end fields
+        return speech_timestamps
 
     def filter_singing_segments(
         self,
@@ -121,7 +118,9 @@ class SpeechDetector:
             Filtered segments containing only speaking (no singing)
         """
         # Load audio with librosa for pitch analysis
-        y, sr = librosa.load(str(audio_path), sr=22050)
+        # Use DEFAULT_SAMPLE_RATE for consistency (pitch analysis works fine at 16kHz)
+        # Full audio is already mono from extraction, but specify mono=True for consistency
+        y, sr = librosa.load(str(audio_path), sr=DEFAULT_SAMPLE_RATE, mono=True)
 
         speaking_segments = []
 
@@ -131,12 +130,15 @@ class SpeechDetector:
             end_sample = int(segment["end"] * sr)
             segment_audio = y[start_sample:end_sample]
 
-            # Skip very short segments
-            if len(segment_audio) < sr * 0.3:  # Less than 300ms
+            # Skip very short segments (pitch analysis needs minimum duration)
+            min_samples = int(sr * MIN_PITCH_ANALYSIS_DURATION_MS / 1000.0)
+            if len(segment_audio) < min_samples:
                 continue
 
-            # Analyze pitch
-            pitches, magnitudes = librosa.piptrack(y=segment_audio, sr=sr, fmin=80, fmax=400)
+            # Analyze pitch within human voice range
+            pitches, magnitudes = librosa.piptrack(
+                y=segment_audio, sr=sr, fmin=PITCH_ANALYSIS_FMIN, fmax=PITCH_ANALYSIS_FMAX
+            )
 
             # Extract dominant pitch over time
             pitch_values = []
@@ -181,10 +183,8 @@ class SpeechDetector:
         Returns:
             Path to created speech-only audio file
         """
-        import soundfile as sf
-
         # Load full audio
-        y, sr = librosa.load(str(audio_path), sr=16000, mono=True)
+        y, sr = librosa.load(str(audio_path), sr=DEFAULT_SAMPLE_RATE, mono=True)
 
         # Extract and concatenate speech segments
         speech_audio_segments = []
@@ -236,7 +236,9 @@ def detect_speech_in_audio(
         segments = detector.filter_singing_segments(audio_path, segments)
 
     # Calculate speech ratio
-    y, sr = librosa.load(str(audio_path), sr=None)
+    # Always use DEFAULT_SAMPLE_RATE for consistency - don't trust file metadata
+    # Full audio is already mono from extraction, but specify mono=True for consistency
+    y, sr = librosa.load(str(audio_path), sr=DEFAULT_SAMPLE_RATE, mono=True)
     total_duration = len(y) / sr
 
     speech_duration = sum(seg["end"] - seg["start"] for seg in segments)

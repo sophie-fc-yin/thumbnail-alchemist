@@ -5,6 +5,13 @@ import sys
 import urllib.request
 from pathlib import Path
 
+try:
+    from transformers import AutoModelForAudioClassification, AutoProcessor
+
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+
 
 def download_fer_model():
     """Download FER+ emotion model from ONNX model zoo."""
@@ -70,6 +77,48 @@ def download_mediapipe_models():
         return True  # Don't fail setup
 
 
+def download_emotion_model():
+    """Download audeering emotion recognition model from HuggingFace."""
+    if not TRANSFORMERS_AVAILABLE:
+        print("⚠️  transformers not available, emotion model will download on first use")
+        return True  # Don't fail setup
+
+    try:
+        print("Downloading emotion recognition model (~1.5GB)...", flush=True)
+        model_name = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
+
+        # Enable progress bars and resume downloads
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_info()  # Show download progress
+
+        print("  Downloading model weights...", flush=True)
+        # This will download to ~/.cache/huggingface/hub
+        AutoModelForAudioClassification.from_pretrained(
+            model_name,
+            resume_download=True,  # Resume if interrupted
+            local_files_only=False,
+            trust_remote_code=True,
+        )
+
+        print("  Downloading feature extractor...", flush=True)
+        AutoProcessor.from_pretrained(
+            model_name,
+            resume_download=True,
+            local_files_only=False,
+            trust_remote_code=True,
+        )
+
+        print("✓ Downloaded emotion recognition model")
+        return True
+    except Exception as e:
+        print(f"⚠️  Emotion model will download on first use: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
+        return True  # Don't fail setup
+
+
 if __name__ == "__main__":
     print("Pre-downloading ML models...\n", flush=True)
 
@@ -77,6 +126,7 @@ if __name__ == "__main__":
     results.append(download_fer_model())
     results.append(download_silero_vad())
     results.append(download_mediapipe_models())
+    results.append(download_emotion_model())
 
     if all(results):
         print("\n✅ All models ready!")

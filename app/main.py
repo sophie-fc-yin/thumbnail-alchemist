@@ -1,3 +1,5 @@
+import logging
+import os
 import re
 from pathlib import Path
 from uuid import uuid4
@@ -8,8 +10,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.analysis.adaptive_sampling import orchestrate_adaptive_sampling
-from app.audio.extraction import extract_audio_from_video, transcribe_and_analyze_audio
-from app.models import (
+from app.analysis.processing import process_audio_analysis
+
+# Configure logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
+
+# Set root logger to WARNING to avoid noise from third-party libraries
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# Enable DEBUG logging for our app modules only
+app_log_level = getattr(logging, LOG_LEVEL, logging.DEBUG)
+for logger_name in ["app", "uvicorn.access"]:
+    logging.getLogger(logger_name).setLevel(app_log_level)
+
+from app.constants import DEFAULT_MAX_DURATION_SECONDS  # noqa: E402
+from app.models import (  # noqa: E402
     AdaptiveSamplingResponse,
     AudioBreakdownRequest,
     AudioBreakdownResponse,
@@ -18,7 +37,6 @@ from app.models import (
     ProcessingStats,
     SignedUrlRequest,
     SignedUrlResponse,
-    SourceMedia,
     ThumbnailRequest,
     ThumbnailResponse,
     VideoUploadError,
@@ -27,12 +45,21 @@ from app.models import (
     VideoUrlResponse,
     VisionBreakdownRequest,
 )
-from app.utils.storage import (
+from app.utils.storage import (  # noqa: E402
     StorageError,
     generate_signed_download_url,
     generate_signed_upload_url,
     upload_file_to_gcs,
+    upload_json_to_gcs,
 )
+from app.vision.extraction import (  # noqa: E402
+    MediaValidationError,
+    VideoDurationExceededError,
+    validate_video_duration,
+)
+
+logger = logging.getLogger(__name__)
+logger.info("Logging configured - App: %s, Root: WARNING", LOG_LEVEL)
 
 app = FastAPI(title="Thumbnail Alchemist API", version="0.1.0")
 
@@ -118,95 +145,134 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
-    # Create SourceMedia object for audio processing
-    source_media = SourceMedia(video_path=payload.video_path)
+    # Generate signed URL once (reuse for validation and processing)
+    video_url = None
+    if payload.video_path.startswith(("gs://", "http://", "https://")):
+        from app.vision.extraction import generate_signed_url
 
-    # Extract audio from video (speech and full audio)
+        video_url = generate_signed_url(payload.video_path)
+
+    # Validate video duration before processing
     try:
-        audio_result = await extract_audio_from_video(
-            content_sources=source_media,
-            project_id=project_id,
+        await validate_video_duration(
+            payload.video_path,
             max_duration_seconds=payload.max_duration_seconds,
+            video_url=video_url,  # Reuse signed URL
+        )
+    except VideoDurationExceededError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video duration exceeds limit",
+                "detail": str(e),
+                "max_duration_seconds": payload.max_duration_seconds,
+            },
+        ) from e
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video validation failed",
+                "detail": str(e),
+            },
+        ) from e
+
+    # Process complete audio analysis pipeline
+    try:
+        audio_analysis_result = await process_audio_analysis(
+            video_path=payload.video_path,
+            project_id=project_id,
+            video_url=video_url,
         )
     except Exception as e:
-        raise ValueError(f"Failed to extract audio from video: {str(e)}") from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Audio analysis failed",
+                "detail": str(e),
+            },
+        ) from e
 
-    if not audio_result:
-        raise ValueError("Failed to extract audio from video: ffmpeg returned no output")
+    # Extract results
+    audio_result = audio_analysis_result["audio_result"]
+    transcription_result = audio_analysis_result["transcription_result"]
+    stream_a_results = audio_analysis_result["stream_a_results"]
+    stream_b_results = audio_analysis_result["stream_b_results"]
+    audio_features = audio_analysis_result["audio_features"]
 
-    # Use speech lane for transcription
-    speech_path = audio_result["speech"]
-
-    # Analyze audio with transcription and features
-    analysis = await transcribe_and_analyze_audio(
-        audio_path=speech_path,  # Use speech-only lane for better transcription
-        project_id=project_id,
-        language=payload.language,
-    )
-
-    # Upload audio files and timeline JSON to GCS
-    from pathlib import Path
-
+    # Upload audio files to GCS (extract_audio_from_video returns local paths)
     from google.cloud import storage
 
-    gcs_speech_url = str(speech_path)  # Default to local path
-    gcs_full_audio_url = str(audio_result["full_audio"])
-
+    gcs_speech_url = ""
     try:
         client = storage.Client()
         bucket = client.bucket("clickmoment-prod-assets")
 
-        # Upload speech audio file
-        speech_blob_path = f"projects/{project_id}/signals/audio/audio_speech.wav"
-        speech_blob = bucket.blob(speech_blob_path)
-        speech_blob.upload_from_filename(str(speech_path))
-        gcs_speech_url = f"gs://clickmoment-prod-assets/{speech_blob_path}"
+        # Upload speech audio file (only if it exists)
+        speech_path = audio_result.get("speech")
+        if speech_path:
+            speech_blob_path = f"projects/{project_id}/signals/audio/audio_speech.wav"
+            speech_blob = bucket.blob(speech_blob_path)
+            speech_blob.upload_from_filename(str(speech_path))
+            gcs_speech_url = f"gs://clickmoment-prod-assets/{speech_blob_path}"
+            Path(speech_path).unlink(missing_ok=True)
+            logger.info("Uploaded speech audio to %s", gcs_speech_url)
 
-        # Upload full audio file (complete audio track)
-        full_audio_path = Path(audio_result["full_audio"])
-        full_audio_blob_path = f"projects/{project_id}/signals/audio/audio_full.wav"
-        full_audio_blob = bucket.blob(full_audio_blob_path)
-        full_audio_blob.upload_from_filename(str(full_audio_path))
-        gcs_full_audio_url = f"gs://clickmoment-prod-assets/{full_audio_blob_path}"
-
-        # Delete local audio files after upload
-        Path(speech_path).unlink()
-        full_audio_path.unlink()
-        print(f"Uploaded speech audio to {gcs_speech_url}")
-        print(f"Uploaded full audio to {gcs_full_audio_url}")
-
-        # Upload timeline JSON if it exists
-        if "timeline_path" in analysis:
-            print(f"Found timeline_path in analysis: {analysis['timeline_path']}")
-            timeline_path = Path(analysis["timeline_path"])
-            if timeline_path.exists():
-                print(f"Timeline file exists at {timeline_path}, uploading...")
-                json_blob_path = f"projects/{project_id}/signals/audio/{timeline_path.name}"
-                json_blob = bucket.blob(json_blob_path)
-                json_blob.upload_from_filename(str(timeline_path))
-
-                gcs_timeline_url = f"gs://clickmoment-prod-assets/{json_blob_path}"
-                print(f"Successfully uploaded timeline JSON to {gcs_timeline_url}")
-
-                # Delete local JSON file after upload
-                timeline_path.unlink()
-            else:
-                print(f"Timeline file does not exist at {timeline_path}")
-        else:
-            print(f"No timeline_path in analysis. Keys: {list(analysis.keys())}")
+        # Upload full audio file
+        full_audio_path = audio_result.get("full_audio")
+        if full_audio_path:
+            full_audio_blob_path = f"projects/{project_id}/signals/audio/audio_full.wav"
+            full_audio_blob = bucket.blob(full_audio_blob_path)
+            full_audio_blob.upload_from_filename(str(full_audio_path))
+            Path(full_audio_path).unlink(missing_ok=True)
+            logger.info(
+                "Uploaded full audio to gs://clickmoment-prod-assets/%s", full_audio_blob_path
+            )
 
     except Exception as e:
-        print(f"Failed to upload audio files to GCS: {e}")
+        logger.error("Failed to upload audio files to GCS: %s", e, exc_info=True)
+
+    # Upload Stream A and Stream B results as JSON
+    if stream_a_results:
+        upload_json_to_gcs(
+            data=stream_a_results,
+            project_id=project_id,
+            directory="signals/audio",
+            filename="stream_a_results.json",
+            bucket_name="clickmoment-prod-assets",
+        )
+        logger.info("Uploaded Stream A results to GCS")
+
+    if stream_b_results:
+        upload_json_to_gcs(
+            data=stream_b_results,
+            project_id=project_id,
+            directory="signals/audio",
+            filename="stream_b_results.json",
+            bucket_name="clickmoment-prod-assets",
+        )
+        logger.info("Uploaded Stream B results to GCS")
+
+    # Handle case where no speech was detected
+    if not transcription_result:
+        return AudioBreakdownResponse(
+            project_id=project_id,
+            audio_path=gcs_speech_url,
+            transcript="",
+            duration_seconds=0.0,
+            stream_a_results=stream_a_results,
+            stream_b_results=stream_b_results,
+            audio_features=audio_features,
+        )
 
     return AudioBreakdownResponse(
         project_id=project_id,
-        audio_path=gcs_speech_url,  # Return speech-only audio path
-        transcript=analysis["transcript"],
-        duration_seconds=analysis["duration_seconds"],
-        speakers=analysis["speakers"],
-        speech_tone=analysis["speech_tone"],
-        music_tone=analysis["music_tone"],
-        timeline=analysis["timeline"],
+        audio_path=gcs_speech_url,
+        transcript=transcription_result.get("transcript", ""),
+        duration_seconds=transcription_result.get("duration_seconds", 0.0),
+        stream_a_results=stream_a_results,
+        stream_b_results=stream_b_results,
+        audio_features=audio_features,
     )
 
 
@@ -228,13 +294,42 @@ async def breakdown_vision(payload: VisionBreakdownRequest) -> AdaptiveSamplingR
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
+    # Generate signed URL once (reuse for validation and processing)
+    video_url = None
+    if payload.video_path.startswith(("gs://", "http://", "https://")):
+        from app.vision.extraction import generate_signed_url
+
+        video_url = generate_signed_url(payload.video_path)
+
+    # Validate video duration before processing
+    try:
+        await validate_video_duration(payload.video_path, video_url=video_url)
+    except VideoDurationExceededError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video duration exceeds limit",
+                "detail": str(e),
+                "max_duration_seconds": DEFAULT_MAX_DURATION_SECONDS,
+            },
+        ) from e
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video validation failed",
+                "detail": str(e),
+            },
+        ) from e
+
     print(f"[API] Starting adaptive sampling for project {project_id}")
 
-    # Run orchestrated pipeline
+    # Run orchestrated pipeline (pass video_url to avoid regenerating signed URL)
     result = await orchestrate_adaptive_sampling(
         video_path=payload.video_path,
         project_id=project_id,
         max_frames=payload.max_frames,
+        video_url=video_url,  # Reuse signed URL
     )
 
     # Convert to response model
@@ -277,6 +372,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     if not video_path:
         # Image-only mode: allow callers to provide pre-extracted frames/screenshots.
         # This keeps the API usable without running the heavy video pipeline.
+        # No duration validation needed for image-only mode
         image_paths = payload.content_sources.image_paths
         if image_paths:
             first = image_paths[0]
@@ -301,6 +397,34 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
                 ),
             )
 
+    # Generate signed URL once (reuse for validation and processing)
+    video_url_for_processing = None
+    if video_path.startswith(("gs://", "http://", "https://")):
+        from app.vision.extraction import generate_signed_url
+
+        video_url_for_processing = generate_signed_url(video_path)
+
+    # Validate video duration before processing
+    try:
+        await validate_video_duration(video_path, video_url=video_url_for_processing)
+    except VideoDurationExceededError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video duration exceeds limit",
+                "detail": str(e),
+                "max_duration_seconds": DEFAULT_MAX_DURATION_SECONDS,
+            },
+        ) from e
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video validation failed",
+                "detail": str(e),
+            },
+        ) from e
+
     # ========================================================================
     # STEP 1: Adaptive Sampling - Extract candidate frames
     # ========================================================================
@@ -316,6 +440,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         video_path=video_path,
         project_id=project_id,
         max_frames=None,  # Auto-calculate based on video duration
+        video_url=video_url_for_processing,  # Reuse signed URL
     )
 
     candidate_frame_urls = adaptive_result["frames"]
@@ -527,28 +652,49 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     def get_frame_info(frame_id: str) -> tuple[int, str, str]:
         """Extract frame number from 'Frame X' format and convert GCS URL to signed HTTP URL.
 
+        CRITICAL: Use debug data to find the correct frame, not array indexing!
+        The frame_id refers to the position in frames sent to Gemini, not the original extracted_frames array.
+
         Returns:
             Tuple of (frame_number, frame_url, timestamp_string)
         """
         from app.vision.extraction import generate_signed_url
 
-        try:
-            num = int(frame_id.replace("Frame", "").strip())
-            # Find matching frame in extracted_frames
-            if 0 < num <= len(extracted_frames):
-                frame = extracted_frames[num - 1]
-                gcs_url = frame.get("url", "")
-                # Get actual timestamp from frame data (not from Gemini response)
-                frame_timestamp = frame.get("timestamp", 0.0)
-                timestamp_str = f"{frame_timestamp:.1f}s"
-                # Convert GCS URL to signed HTTP URL
-                if gcs_url.startswith("gs://"):
-                    return num, generate_signed_url(gcs_url), timestamp_str
-                return num, gcs_url, timestamp_str
-        except (ValueError, IndexError):
-            pass
+        # CRITICAL: Use debug.all_frames_scored to find the correct timestamp for this frame_id
+        # The frame_id number refers to the position in the TOP 10 frames sent to Gemini
+        all_frames_scored = debug_data.get("all_frames_scored", [])
 
-        # Fallback to first frame
+        # Find the frame in debug data by frame_id
+        matching_debug_frame = None
+        for debug_frame in all_frames_scored:
+            if debug_frame.get("frame_id") == frame_id:
+                matching_debug_frame = debug_frame
+                break
+
+        if matching_debug_frame:
+            # Get the actual timestamp from debug data
+            debug_timestamp = matching_debug_frame.get("timestamp", "0.0s")
+            # Parse timestamp string (format: "XX.Xs")
+            try:
+                timestamp_seconds = float(debug_timestamp.replace("s", ""))
+            except (ValueError, AttributeError):
+                timestamp_seconds = 0.0
+
+            # Find the frame in extracted_frames by matching timestamp (within 0.5s tolerance)
+            for frame in extracted_frames:
+                frame_ts = frame.get("timestamp", 0.0)
+                if abs(frame_ts - timestamp_seconds) < 0.5:
+                    gcs_url = frame.get("url", "")
+                    frame_num = frame.get("frame_number", 1)
+                    timestamp_str = f"{frame_ts:.1f}s"
+
+                    # Convert GCS URL to signed HTTP URL
+                    if gcs_url.startswith("gs://"):
+                        return frame_num, generate_signed_url(gcs_url), timestamp_str
+                    return frame_num, gcs_url, timestamp_str
+
+        # Fallback to first frame if no match found
+        print(f"⚠️  [FRAME LOOKUP] Could not find frame for {frame_id}, using fallback")
         if extracted_frames:
             gcs_url = extracted_frames[0].get("url", "")
             frame_timestamp = extracted_frames[0].get("timestamp", 0.0)
@@ -871,15 +1017,21 @@ async def upload_video(
     file: UploadFile = File(..., description="Video file to upload"),
     user_id: str = Form(..., description="User ID from your application"),
 ) -> VideoUploadResponse:
-    """
+    max_duration_min = DEFAULT_MAX_DURATION_SECONDS // 60
+    max_duration_sec = DEFAULT_MAX_DURATION_SECONDS
+    f"""
     Upload a video file to cloud storage.
 
     **File Requirements:**
     - Max size: 5 GB
+    - Max duration: {max_duration_min} minutes ({max_duration_sec} seconds)
     - Allowed formats: mp4, mov, avi, mkv, webm, flv
 
+    **Note:** Videos longer than {max_duration_min} minutes will be truncated during processing.
+    Only the first {max_duration_min} minutes will be analyzed for transcription and thumbnail selection.
+
     **Storage Path:**
-    - Files saved to: `users/{user_id}/videos/{filename}`
+    - Files saved to: `users/{{user_id}}/videos/{{filename}}`
     - Files with same name are overwritten (with warning in response)
 
     **Example:**

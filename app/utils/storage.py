@@ -1,7 +1,12 @@
 """Google Cloud Storage utilities for file uploads."""
 
+import json
+import logging
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class StorageError(Exception):
@@ -258,3 +263,61 @@ def generate_signed_download_url(
         raise
     except Exception as e:
         raise StorageError(f"Unexpected error generating signed URL: {str(e)}") from e
+
+
+def upload_json_to_gcs(
+    data: dict[str, Any] | list[dict[str, Any]],
+    project_id: str,
+    directory: str,
+    filename: str,
+    bucket_name: str = "clickmoment-prod-assets",
+) -> str | None:
+    """
+    Upload JSON data to GCS in a project-specific directory.
+
+    Handles serialization of Path objects and other non-serializable types.
+    All exceptions are handled internally - returns None on failure.
+
+    Args:
+        data: JSON-serializable data (dict or list)
+        project_id: Project identifier
+        directory: Directory path within project (e.g., "signals/audio")
+        filename: JSON filename (e.g., "speech_segments.json")
+        bucket_name: GCS bucket name
+
+    Returns:
+        GCS URL (gs://bucket/path) if successful, None on failure
+    """
+    try:
+        # Convert Path objects to strings for JSON serialization
+        def convert_paths(obj: Any) -> Any:
+            if isinstance(obj, Path):
+                return str(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_paths(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_paths(item) for item in obj]
+            return obj
+
+        serializable_data = convert_paths(data)
+        json_content = json.dumps(serializable_data, indent=2, ensure_ascii=False)
+
+        client = _get_storage_client()
+        bucket = client.bucket(bucket_name)
+        blob_path = f"projects/{project_id}/{directory}/{filename}"
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(json_content, content_type="application/json")
+
+        gcs_url = f"gs://{bucket_name}/{blob_path}"
+        logger.info("Uploaded JSON to %s", gcs_url)
+        return gcs_url
+
+    except Exception as e:
+        logger.warning(
+            "Failed to upload JSON to GCS (projects/%s/%s/%s): %s",
+            project_id,
+            directory,
+            filename,
+            e,
+        )
+        return None

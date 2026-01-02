@@ -22,9 +22,12 @@ All detections return unified format compatible with Stream A:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class AudioSaliencyDetector:
@@ -60,7 +63,7 @@ class AudioSaliencyDetector:
         self.impact_threshold = impact_threshold
 
     def detect_energy_peaks(
-        self, audio_features: dict[str, Any], percentile: float = 90.0
+        self, audio_features: list[dict[str, Any]], percentile: float = 90.0
     ) -> list[dict[str, Any]]:
         """
         Detect sudden energy spikes (loudness jumps).
@@ -79,6 +82,8 @@ class AudioSaliencyDetector:
             [
                 {
                     "time": 5.2,
+                    "start": 5.1,
+                    "end": 5.3,
                     "type": "energy_peak",
                     "score": 0.95,
                     "source": "audio",
@@ -91,8 +96,8 @@ class AudioSaliencyDetector:
                 ...
             ]
         """
-        energy = np.array(audio_features["energy"])
-        times = np.array(audio_features["times"])
+        segments = audio_features
+        energy = np.array([seg["energy"] for seg in segments])
 
         # Calculate energy delta (change rate)
         energy_delta = np.abs(np.diff(energy, prepend=energy[0]))
@@ -105,8 +110,9 @@ class AudioSaliencyDetector:
 
         peaks = []
         for idx in peak_indices:
+            seg = segments[idx]
             # Skip if too close to previous peak (within 0.5s)
-            if peaks and (times[idx] - peaks[-1]["time"]) < 0.5:
+            if peaks and (seg["start"] - peaks[-1]["time"]) < 0.5:
                 continue
 
             # Calculate peak ratio (current / previous)
@@ -120,7 +126,9 @@ class AudioSaliencyDetector:
 
             peaks.append(
                 {
-                    "time": float(times[idx]),
+                    "time": float(seg["start"]),
+                    "start": float(seg["start"]),
+                    "end": float(seg["end"]),
                     "type": "energy_peak",
                     "score": float(score),
                     "source": "audio",
@@ -135,7 +143,7 @@ class AudioSaliencyDetector:
         return peaks
 
     def detect_spectral_changes(
-        self, audio_features: dict[str, Any], percentile: float = 85.0
+        self, audio_features: list[dict[str, Any]], percentile: float = 85.0
     ) -> list[dict[str, Any]]:
         """
         Detect timbre/frequency content changes.
@@ -155,6 +163,8 @@ class AudioSaliencyDetector:
             [
                 {
                     "time": 12.8,
+                    "start": 12.7,
+                    "end": 12.9,
                     "type": "spectral_change",
                     "score": 0.82,
                     "source": "audio",
@@ -166,8 +176,8 @@ class AudioSaliencyDetector:
                 ...
             ]
         """
-        spectral_brightness = np.array(audio_features["spectral_brightness"])
-        times = np.array(audio_features["times"])
+        segments = audio_features
+        spectral_brightness = np.array([seg["spectral_brightness"] for seg in segments])
 
         # Calculate spectral flux (change in brightness)
         spectral_delta = np.abs(np.diff(spectral_brightness, prepend=spectral_brightness[0]))
@@ -180,8 +190,9 @@ class AudioSaliencyDetector:
 
         changes = []
         for idx in change_indices:
+            seg = segments[idx]
             # Skip if too close to previous change (within 0.5s)
-            if changes and (times[idx] - changes[-1]["time"]) < 0.5:
+            if changes and (seg["start"] - changes[-1]["time"]) < 0.5:
                 continue
 
             # Determine brightness direction
@@ -199,7 +210,9 @@ class AudioSaliencyDetector:
 
             changes.append(
                 {
-                    "time": float(times[idx]),
+                    "time": float(seg["start"]),
+                    "start": float(seg["start"]),
+                    "end": float(seg["end"]),
                     "type": "spectral_change",
                     "score": float(score),
                     "source": "audio",
@@ -215,7 +228,7 @@ class AudioSaliencyDetector:
         return changes
 
     def detect_silence_to_impact(
-        self, audio_features: dict[str, Any], silence_window: int = 10
+        self, audio_features: list[dict[str, Any]], silence_window: int = 10
     ) -> list[dict[str, Any]]:
         """
         Detect dramatic silence → loud moments.
@@ -234,6 +247,8 @@ class AudioSaliencyDetector:
             [
                 {
                     "time": 23.4,
+                    "start": 23.3,
+                    "end": 23.5,
                     "type": "silence_to_impact",
                     "score": 0.88,
                     "source": "audio",
@@ -246,12 +261,12 @@ class AudioSaliencyDetector:
                 ...
             ]
         """
-        energy = np.array(audio_features["energy"])
-        times = np.array(audio_features["times"])
+        segments = audio_features
+        energy = np.array([seg["energy"] for seg in segments])
 
         impacts = []
 
-        for idx in range(silence_window, len(energy)):
+        for idx in range(silence_window, len(segments)):
             # Check if current moment is loud
             if energy[idx] < self.impact_threshold:
                 continue
@@ -268,7 +283,7 @@ class AudioSaliencyDetector:
                     silence_start_idx = i + 1
                     break
 
-            silence_duration = times[idx] - times[silence_start_idx]
+            silence_duration = segments[idx]["start"] - segments[silence_start_idx]["start"]
 
             # Skip very short silences (< 0.3s)
             if silence_duration < 0.3:
@@ -282,7 +297,7 @@ class AudioSaliencyDetector:
                 contrast_ratio = 10.0
 
             # Skip if already detected nearby impact
-            if impacts and (times[idx] - impacts[-1]["time"]) < 1.0:
+            if impacts and (segments[idx]["start"] - impacts[-1]["time"]) < 1.0:
                 continue
 
             # Normalize score [0, 1]
@@ -293,7 +308,9 @@ class AudioSaliencyDetector:
 
             impacts.append(
                 {
-                    "time": float(times[idx]),
+                    "time": float(segments[idx]["start"]),
+                    "start": float(segments[idx]["start"]),
+                    "end": float(segments[idx]["end"]),
                     "type": "silence_to_impact",
                     "score": float(score),
                     "source": "audio",
@@ -301,7 +318,7 @@ class AudioSaliencyDetector:
                         "silence_duration": float(silence_duration),
                         "impact_energy": float(energy[idx]),
                         "contrast_ratio": float(contrast_ratio),
-                        "silence_start": float(times[silence_start_idx]),
+                        "silence_start": float(segments[silence_start_idx]["start"]),
                     },
                 }
             )
@@ -309,7 +326,7 @@ class AudioSaliencyDetector:
         return impacts
 
     def detect_non_speech_sounds(
-        self, audio_features: dict[str, Any], speech_segments: list[dict[str, float]]
+        self, audio_features: list[dict[str, Any]], speech_segments: list[dict[str, float]]
     ) -> list[dict[str, Any]]:
         """
         Detect high-impact sounds outside of speech segments.
@@ -329,6 +346,8 @@ class AudioSaliencyDetector:
             [
                 {
                     "time": 8.7,
+                    "start": 8.6,
+                    "end": 8.8,
                     "type": "non_speech_sound",
                     "score": 0.75,
                     "source": "audio",
@@ -341,23 +360,24 @@ class AudioSaliencyDetector:
                 ...
             ]
         """
-        energy = np.array(audio_features["energy"])
-        zcr = np.array(audio_features["zero_crossing_rate"])
-        times = np.array(audio_features["times"])
+        segments = audio_features
+        energy = np.array([seg["energy"] for seg in segments])
+        zcr = np.array([seg["zero_crossing_rate"] for seg in segments])
 
         # Create speech mask
-        speech_mask = np.zeros(len(times), dtype=bool)
-        for segment in speech_segments:
-            start_idx = np.searchsorted(times, segment["start"])
-            end_idx = np.searchsorted(times, segment["end"])
-            speech_mask[start_idx:end_idx] = True
+        speech_mask = np.zeros(len(segments), dtype=bool)
+        for speech_seg in speech_segments:
+            for i, seg in enumerate(segments):
+                # Check if segment overlaps with speech segment
+                if not (seg["end"] <= speech_seg["start"] or seg["start"] >= speech_seg["end"]):
+                    speech_mask[i] = True
 
         non_speech_sounds = []
 
         # Find high-energy non-speech moments
         high_energy_threshold = np.percentile(energy, 75)
 
-        for idx in range(len(times)):
+        for idx, seg in enumerate(segments):
             # Skip speech segments
             if speech_mask[idx]:
                 continue
@@ -367,7 +387,7 @@ class AudioSaliencyDetector:
                 continue
 
             # Skip if too close to previous detection
-            if non_speech_sounds and (times[idx] - non_speech_sounds[-1]["time"]) < 0.5:
+            if non_speech_sounds and (seg["start"] - non_speech_sounds[-1]["time"]) < 0.5:
                 continue
 
             # Classify sound type based on features
@@ -384,7 +404,9 @@ class AudioSaliencyDetector:
 
             non_speech_sounds.append(
                 {
-                    "time": float(times[idx]),
+                    "time": float(seg["start"]),
+                    "start": float(seg["start"]),
+                    "end": float(seg["end"]),
                     "type": "non_speech_sound",
                     "score": float(score),
                     "source": "audio",
@@ -400,71 +422,190 @@ class AudioSaliencyDetector:
 
 
 def detect_audio_saliency(
-    audio_features: dict[str, Any], speech_segments: list[dict[str, float]] | None = None
-) -> dict[str, Any]:
+    audio_features: list[dict[str, Any]], speech_segments: list[dict[str, float]] | None = None
+) -> list[dict[str, Any]]:
     """
     Complete Stream B analysis: perceptual saliency detection.
 
-    Detects all types of impactful audio moments and creates unified timeline.
+    Detects all types of impactful audio moments and combines them into segments.
 
     Args:
-        audio_features: Output from analyze_audio_features()
+        audio_features: Output from analyze_audio_features() - list of segments with start/end and features
         speech_segments: Optional speech segments from VAD (for non-speech detection)
 
     Returns:
-        Stream B analysis results:
-        {
-            "energy_peaks": [...],         # Sudden loudness spikes
-            "spectral_changes": [...],     # Timbre/frequency shifts
-            "silence_to_impact": [...],    # Dramatic quiet → loud
-            "non_speech_sounds": [...],    # Music/effects outside speech
-            "saliency_timeline": [...]     # Unified timeline (compatible with Stream A)
-        }
+        List of segments with all saliency features combined (same format as speech_segments):
+        [
+            {
+                "start": 0.0,
+                "end": 0.1,
+                "pitch": 120.5,
+                "pitch_variance": 10.2,
+                "energy": 0.15,
+                "zero_crossing_rate": 0.05,
+                "spectral_brightness": 1500.0,
+                "spectral_rolloff": 3000.0,
+                "has_energy_peak": True,
+                "energy_peak_score": 0.95,
+                "has_spectral_change": False,
+                "has_silence_to_impact": False,
+                "has_non_speech_sound": True,
+                "non_speech_sound_type": "percussive",
+                "non_speech_sound_score": 0.75,
+                "saliency_score": 0.85,  # Combined saliency score
+            },
+            ...
+        ]
     """
     detector = AudioSaliencyDetector()
 
     # 1. Detect energy peaks
-    print("[Stream B] Detecting energy peaks...")
+    logger.debug("Detecting energy peaks...")
     energy_peaks = detector.detect_energy_peaks(audio_features)
 
     # 2. Detect spectral changes
-    print("[Stream B] Detecting spectral changes...")
+    logger.debug("Detecting spectral changes...")
     spectral_changes = detector.detect_spectral_changes(audio_features)
 
     # 3. Detect silence-to-impact moments
-    print("[Stream B] Detecting silence-to-impact moments...")
+    logger.debug("Detecting silence-to-impact moments...")
     silence_impacts = detector.detect_silence_to_impact(audio_features)
 
     # 4. Detect non-speech sounds (if speech segments provided)
     non_speech_sounds = []
     if speech_segments:
-        print("[Stream B] Detecting non-speech sounds...")
+        logger.debug("Detecting non-speech sounds...")
         non_speech_sounds = detector.detect_non_speech_sounds(audio_features, speech_segments)
 
-    # 5. Create unified saliency timeline (compatible with Stream A)
-    saliency_timeline = []
+    # 5. Combine all detections into segments (same format as speech_segments)
+    # Start with base audio_features segments and add saliency features
+    saliency_segments = []
 
-    # Add all detections to timeline
-    saliency_timeline.extend(energy_peaks)
-    saliency_timeline.extend(spectral_changes)
-    saliency_timeline.extend(silence_impacts)
-    saliency_timeline.extend(non_speech_sounds)
+    # Create lookup maps for efficient matching
+    energy_peaks_by_segment = {}
+    for peak in energy_peaks:
+        # Find which audio_features segment this peak belongs to
+        for i, seg in enumerate(audio_features):
+            if seg["start"] <= peak["start"] < seg["end"]:
+                if i not in energy_peaks_by_segment:
+                    energy_peaks_by_segment[i] = []
+                energy_peaks_by_segment[i].append(peak)
+                break
 
-    # Sort by time
-    saliency_timeline.sort(key=lambda x: x["time"])
+    spectral_changes_by_segment = {}
+    for change in spectral_changes:
+        for i, seg in enumerate(audio_features):
+            if seg["start"] <= change["start"] < seg["end"]:
+                if i not in spectral_changes_by_segment:
+                    spectral_changes_by_segment[i] = []
+                spectral_changes_by_segment[i].append(change)
+                break
 
-    print(
-        f"[Stream B] Saliency detection complete: "
-        f"{len(energy_peaks)} energy peaks, "
-        f"{len(spectral_changes)} spectral changes, "
-        f"{len(silence_impacts)} silence→impact, "
-        f"{len(non_speech_sounds)} non-speech sounds"
+    silence_impacts_by_segment = {}
+    for impact in silence_impacts:
+        for i, seg in enumerate(audio_features):
+            if seg["start"] <= impact["start"] < seg["end"]:
+                if i not in silence_impacts_by_segment:
+                    silence_impacts_by_segment[i] = []
+                silence_impacts_by_segment[i].append(impact)
+                break
+
+    non_speech_by_segment = {}
+    for sound in non_speech_sounds:
+        for i, seg in enumerate(audio_features):
+            if seg["start"] <= sound["start"] < seg["end"]:
+                if i not in non_speech_by_segment:
+                    non_speech_by_segment[i] = []
+                non_speech_by_segment[i].append(sound)
+                break
+
+    # Build unified segments with all features
+    for i, seg in enumerate(audio_features):
+        # Start with base segment features
+        saliency_seg = {
+            "start": seg["start"],
+            "end": seg["end"],
+            "pitch": seg["pitch"],
+            "pitch_variance": seg["pitch_variance"],
+            "energy": seg["energy"],
+            "zero_crossing_rate": seg["zero_crossing_rate"],
+            "spectral_brightness": seg["spectral_brightness"],
+            "spectral_rolloff": seg["spectral_rolloff"],
+        }
+
+        # Add energy peak features
+        if i in energy_peaks_by_segment:
+            peaks = energy_peaks_by_segment[i]
+            saliency_seg["has_energy_peak"] = True
+            saliency_seg["energy_peak_score"] = max(p["score"] for p in peaks)
+            saliency_seg["energy_peak_count"] = len(peaks)
+        else:
+            saliency_seg["has_energy_peak"] = False
+            saliency_seg["energy_peak_score"] = 0.0
+            saliency_seg["energy_peak_count"] = 0
+
+        # Add spectral change features
+        if i in spectral_changes_by_segment:
+            changes = spectral_changes_by_segment[i]
+            saliency_seg["has_spectral_change"] = True
+            saliency_seg["spectral_change_score"] = max(c["score"] for c in changes)
+            saliency_seg["spectral_change_count"] = len(changes)
+        else:
+            saliency_seg["has_spectral_change"] = False
+            saliency_seg["spectral_change_score"] = 0.0
+            saliency_seg["spectral_change_count"] = 0
+
+        # Add silence-to-impact features
+        if i in silence_impacts_by_segment:
+            impacts = silence_impacts_by_segment[i]
+            saliency_seg["has_silence_to_impact"] = True
+            saliency_seg["silence_to_impact_score"] = max(imp["score"] for imp in impacts)
+            saliency_seg["silence_to_impact_count"] = len(impacts)
+        else:
+            saliency_seg["has_silence_to_impact"] = False
+            saliency_seg["silence_to_impact_score"] = 0.0
+            saliency_seg["silence_to_impact_count"] = 0
+
+        # Add non-speech sound features
+        if i in non_speech_by_segment:
+            sounds = non_speech_by_segment[i]
+            saliency_seg["has_non_speech_sound"] = True
+            saliency_seg["non_speech_sound_score"] = max(s["score"] for s in sounds)
+            saliency_seg["non_speech_sound_count"] = len(sounds)
+            # Use the most common sound type
+            sound_types = [s["metadata"]["sound_type"] for s in sounds]
+            saliency_seg["non_speech_sound_type"] = max(set(sound_types), key=sound_types.count)
+        else:
+            saliency_seg["has_non_speech_sound"] = False
+            saliency_seg["non_speech_sound_score"] = 0.0
+            saliency_seg["non_speech_sound_count"] = 0
+            saliency_seg["non_speech_sound_type"] = None
+
+        # Calculate combined saliency score (weighted average of all detection scores)
+        saliency_scores = []
+        if saliency_seg["has_energy_peak"]:
+            saliency_scores.append(saliency_seg["energy_peak_score"])
+        if saliency_seg["has_spectral_change"]:
+            saliency_scores.append(saliency_seg["spectral_change_score"])
+        if saliency_seg["has_silence_to_impact"]:
+            saliency_scores.append(saliency_seg["silence_to_impact_score"])
+        if saliency_seg["has_non_speech_sound"]:
+            saliency_scores.append(saliency_seg["non_speech_sound_score"])
+
+        if saliency_scores:
+            saliency_seg["saliency_score"] = float(sum(saliency_scores) / len(saliency_scores))
+        else:
+            saliency_seg["saliency_score"] = 0.0
+
+        saliency_segments.append(saliency_seg)
+
+    logger.info(
+        "Stream B saliency detection complete: %d segments, %d energy peaks, %d spectral changes, %d silence→impact, %d non-speech sounds",
+        len(saliency_segments),
+        len(energy_peaks),
+        len(spectral_changes),
+        len(silence_impacts),
+        len(non_speech_sounds),
     )
 
-    return {
-        "energy_peaks": energy_peaks,
-        "spectral_changes": spectral_changes,
-        "silence_to_impact": silence_impacts,
-        "non_speech_sounds": non_speech_sounds,
-        "saliency_timeline": saliency_timeline,  # UNIFIED FORMAT
-    }
+    return saliency_segments
