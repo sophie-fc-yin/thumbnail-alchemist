@@ -4,12 +4,15 @@ This module provides facial expression intensity detection for adaptive frame sa
 Uses MediaPipe for face structure and FER+ for expression intensity.
 """
 
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 import onnxruntime as ort
+from mediapipe import Image as MPImage
+from mediapipe import ImageFormat, tasks
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import FaceLandmarkerOptions
 
@@ -25,8 +28,6 @@ class FaceExpressionAnalyzer:
             model_path: Path to FER+ ONNX model. If None, downloads from HuggingFace.
         """
         # MediaPipe FaceLandmarker (new API in MediaPipe 0.10+)
-        from mediapipe import tasks
-
         # Download face landmarker model
         model_dir = Path.home() / ".cache" / "mediapipe"
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -34,8 +35,6 @@ class FaceExpressionAnalyzer:
 
         if not model_asset_path.exists():
             print("Downloading face landmarker model...")
-            import urllib.request
-
             url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
             urllib.request.urlretrieve(url, str(model_asset_path))
             print(f"Downloaded to {model_asset_path}")
@@ -104,6 +103,11 @@ class FaceExpressionAnalyzer:
                 - emotion_probs: dict - probability for each emotion
                 - landmarks: list - facial landmarks (for motion calculation)
         """
+        # Check if file exists before attempting to read
+        frame_path_obj = Path(frame_path)
+        if not frame_path_obj.exists():
+            return self._empty_result()
+
         # Read and convert image
         image = cv2.imread(str(frame_path))
         if image is None:
@@ -113,9 +117,6 @@ class FaceExpressionAnalyzer:
         h, w = image.shape[:2]
 
         # Create MediaPipe Image object
-        from mediapipe import Image as MPImage
-        from mediapipe import ImageFormat
-
         mp_image = MPImage(image_format=ImageFormat.SRGB, data=rgb)
 
         # MediaPipe face detection and landmarks (new API)
@@ -150,9 +151,8 @@ class FaceExpressionAnalyzer:
         else:
             dominant_emotion = "neutral"
 
-        # Convert landmarks to list for motion tracking
-        # New API: landmarks is a list of NormalizedLandmark objects
-        landmark_coords = [(lm.x, lm.y, lm.z) for lm in landmarks]
+        # Landmarks removed - not used anywhere in the codebase
+        # If needed in future, can be re-enabled for facial motion tracking
 
         return {
             "has_face": True,
@@ -162,7 +162,6 @@ class FaceExpressionAnalyzer:
             "mouth_openness": float(mouth_openness),
             "head_pose": head_pose,
             "emotion_probs": emotion_probs,
-            "landmarks": landmark_coords,
         }
 
     def _empty_result(self) -> dict[str, Any]:
@@ -175,7 +174,6 @@ class FaceExpressionAnalyzer:
             "mouth_openness": 0.0,
             "head_pose": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0},
             "emotion_probs": {},
-            "landmarks": [],
         }
 
     def _calculate_eye_openness(self, landmarks, img_h: int, img_w: int) -> float:

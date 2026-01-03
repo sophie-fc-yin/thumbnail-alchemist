@@ -1,6 +1,8 @@
 # ============================================================================
 # PROJECT CONFIGURATION
 # ============================================================================
+import os
+
 # GCS Buckets (consolidated - use these names throughout the codebase)
 PROJECT_ASSETS_BUCKET = "clickmoment-prod-assets"
 PROJECT_TEMP_BUCKET = "clickmoment-prod-temp"
@@ -243,8 +245,81 @@ SAMPLE_INTERVAL_SECONDS = 3.0  # Initial sparse sampling: 1 frame every 3 second
 FFMPEG_OUTPUT_PATTERN = "sample_%03d.jpg"
 SEGMENT_FRAME_PATTERN = "frame_%03d.jpg"
 
+# Adaptive Sampling Interval Formula (Normal Distribution)
+ADAPTIVE_SAMPLE_INTERVAL_MEAN = 3.0  # Mean/median interval in seconds (normal distribution center)
+ADAPTIVE_SAMPLE_INTERVAL_STD_DEV = 1.5  # Standard deviation for normal distribution
+ADAPTIVE_SAMPLE_INTERVAL_REF_DURATION = (
+    240.0  # 4 minutes - reference duration for z-score calculation
+)
+ADAPTIVE_SAMPLE_INTERVAL_SCALE = 2.0  # Controls sensitivity of interval to duration changes
+ADAPTIVE_SAMPLE_INTERVAL_MIN = 1.0  # Minimum interval (very short videos)
+ADAPTIVE_SAMPLE_INTERVAL_MAX = 7.0  # Maximum interval (very long videos)
+
+# ============================================================================
+# ADAPTIVE SAMPLING INTERVALS (New System)
+# ============================================================================
+# Base intervals (before adaptive scaling based on video duration)
+BASE_DENSE_INTERVAL_CRITICAL = 0.3  # Critical importance base: ~3.3 fps
+BASE_DENSE_INTERVAL_HIGH = 0.5  # High importance base: 2 fps
+BASE_DENSE_INTERVAL_MEDIUM = 1.0  # Medium importance base: 1 fps
+BASE_DENSE_INTERVAL_LOW = 2.0  # Low importance base: 0.5 fps
+BASE_DENSE_INTERVAL_MINIMAL = 3.0  # Minimal importance base: 0.33 fps
+
+# Adaptive interval scaling thresholds
+ADAPTIVE_INTERVAL_SHORT_THRESHOLD = 120.0  # < 2 min: no scaling (scale = 1.0)
+ADAPTIVE_INTERVAL_MEDIUM_THRESHOLD = 600.0  # 2-10 min: linear scale 1.0x → 2.0x
+ADAPTIVE_INTERVAL_SCALE_MAX = 3.0  # Maximum scale factor (caps at 3.0x for long videos)
+
+# Video FPS detection
+DEFAULT_VIDEO_FPS = 30.0  # Fallback FPS if detection fails
+FPS_MULTIPLIER_MIN_INTERVAL = 1.5  # Never sample faster than 1.5x video frame duration
+FPS_VALID_RANGE_MIN = 15.0  # Minimum valid FPS
+FPS_VALID_RANGE_MAX = 120.0  # Maximum valid FPS
+
+# Short segment handling
+SHORT_SEGMENT_THRESHOLD = 1.0  # Extract single frame at midpoint if segment < 1s
+
+# ============================================================================
+# DEPRECATED: Legacy Fixed Intervals (use BASE_* constants with adaptive scaling)
+# ============================================================================
+DENSE_INTERVAL_CRITICAL = (
+    0.3  # DEPRECATED: Use BASE_DENSE_INTERVAL_CRITICAL with get_adaptive_intervals()
+)
+DENSE_INTERVAL_HIGH = 0.5  # DEPRECATED: Use BASE_DENSE_INTERVAL_HIGH with get_adaptive_intervals()
+DENSE_INTERVAL_MEDIUM = (
+    1.0  # DEPRECATED: Use BASE_DENSE_INTERVAL_MEDIUM with get_adaptive_intervals()
+)
+DENSE_INTERVAL_LOW = 2.0  # DEPRECATED: Use BASE_DENSE_INTERVAL_LOW with get_adaptive_intervals()
+DENSE_INTERVAL_MINIMAL = (
+    3.0  # DEPRECATED: Use BASE_DENSE_INTERVAL_MINIMAL with get_adaptive_intervals()
+)
+MIN_DENSE_SAMPLING_INTERVAL = 0.3  # DEPRECATED: No longer enforced as hard limit
+
+# Segment Duration Limits
+MIN_IMPORTANCE_SEGMENT_DURATION = 1.0  # Minimum duration for importance segments (seconds) - merges smaller segments (10x extraction threshold)
+MAX_IMPORTANCE_SEGMENT_DURATION = (
+    10.0  # Maximum duration for importance segments (seconds) - prevents overly long segments
+)
+VISUAL_CHANGE_LOW_THRESHOLD = (
+    0.3  # Below this, merge segments (low visual change = longer segments)
+)
+VISUAL_CHANGE_HIGH_THRESHOLD = (
+    0.4  # Above this, create boundaries (lowered from 0.6 to detect more shot changes)
+)
+VISUAL_CHANGE_SEPARATE_THRESHOLD = (
+    0.6  # Above this, keep segments separate (high visual change = shorter segments)
+)
+
+# Parallel Processing Limits
+MAX_CONCURRENT_SEGMENT_EXTRACTIONS = 10  # Maximum concurrent ffmpeg processes
+MIN_SEGMENT_DURATION_FOR_EXTRACTION = 0.1  # Skip segments shorter than this (seconds)
+
 # Local Storage Paths
-LOCAL_MEDIA_DIR = "thumbnail-alchemist-media"
+# On Cloud Run, use /tmp (only writable directory)
+# In local/dev, use relative path for easier debugging
+LOCAL_MEDIA_DIR = os.getenv(
+    "LOCAL_MEDIA_DIR", os.path.join(os.getenv("TMPDIR", "/tmp"), "thumbnail-alchemist-media")
+)
 TEMP_DIR_NAME = "temp"
 SAMPLE_FRAMES_DIR = "sample_frames"
 DOWNLOADED_SAMPLES_DIR = "downloaded_samples"

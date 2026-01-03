@@ -1,14 +1,36 @@
 """Visual media handling - validation, preprocessing."""
 
+import asyncio
+import logging
+import shutil
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import google.auth
+from google.auth import compute_engine
+from google.auth.transport import requests
+from google.cloud import storage  # type: ignore
+
+from app.constants import (
+    DEFAULT_MAX_DURATION_SECONDS,
+    DEFAULT_VIDEO_FPS,
+    FPS_VALID_RANGE_MAX,
+    FPS_VALID_RANGE_MIN,
+)
 from app.models import SourceMedia
+
+logger = logging.getLogger(__name__)
 
 
 class MediaValidationError(Exception):
     """Raised when media validation fails."""
+
+    pass
+
+
+class VideoDurationExceededError(MediaValidationError):
+    """Raised when video duration exceeds the maximum allowed duration."""
 
     pass
 
@@ -64,11 +86,6 @@ def generate_signed_url(
     bucket_name, blob_name = parsed
 
     try:
-        import google.auth
-        from google.auth import compute_engine
-        from google.auth.transport import requests
-        from google.cloud import storage  # type: ignore
-
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
@@ -117,6 +134,165 @@ def generate_signed_url(
         if not require_signing and url.startswith("https://"):
             return url
         raise MediaValidationError(f"Failed to generate signed URL for {url}: {e}") from e
+
+
+async def get_video_duration(video_path: str, video_url: str | None = None) -> float:
+    """
+    Get video duration in seconds using ffprobe.
+
+    Args:
+        video_path: Path to video file (local path, GCS URL, or HTTP URL)
+        video_url: Optional pre-generated signed URL (avoids duplicate signing)
+
+    Returns:
+        Video duration in seconds
+
+    Raises:
+        MediaValidationError: If video duration cannot be determined
+    """
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
+        raise MediaValidationError("ffprobe not found. Cannot determine video duration.")
+
+    # Use pre-generated signed URL if provided, otherwise generate one
+    if video_url:
+        # Reuse pre-generated signed URL (avoids duplicate GCS API calls)
+        pass  # video_url already set
+    elif video_path.startswith(("gs://", "http://", "https://")):
+        video_url = generate_signed_url(video_path)
+    else:
+        video_url = video_path
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            ffprobe_path,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Unknown error"
+            raise MediaValidationError(
+                f"Failed to get video duration: ffprobe returned code {process.returncode}: {error_msg}"
+            )
+
+        duration_str = stdout.decode().strip()
+        if not duration_str:
+            raise MediaValidationError("ffprobe returned empty duration")
+
+        duration = float(duration_str)
+        if duration <= 0:
+            raise MediaValidationError(f"Invalid video duration: {duration} seconds")
+
+        return duration
+
+    except ValueError as e:
+        raise MediaValidationError(f"Failed to parse video duration: {e}") from e
+    except Exception as e:
+        raise MediaValidationError(f"Failed to get video duration: {e}") from e
+
+
+async def get_video_fps(video_path: str, video_url: str | None = None) -> float:
+    """
+    Get video frame rate (FPS) using ffprobe.
+
+    Args:
+        video_path: Path to video file (local path, GCS URL, or HTTP URL)
+        video_url: Optional pre-generated signed URL (avoids duplicate signing)
+
+    Returns:
+        Video frame rate (frames per second), defaults to DEFAULT_VIDEO_FPS if detection fails
+    """
+
+    ffprobe_path = shutil.which("ffprobe")
+    if not ffprobe_path:
+        logger.warning("ffprobe not found, using default FPS: %.1f", DEFAULT_VIDEO_FPS)
+        return DEFAULT_VIDEO_FPS
+
+    # Use pre-generated signed URL if provided, otherwise generate one
+    if video_url:
+        pass  # video_url already set
+    elif video_path.startswith(("gs://", "http://", "https://")):
+        video_url = generate_signed_url(video_path)
+    else:
+        video_url = video_path
+
+    try:
+        # Get r_frame_rate (most accurate for constant FPS videos)
+        process = await asyncio.create_subprocess_exec(
+            ffprobe_path,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            video_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode == 0 and stdout:
+            fps_str = stdout.decode().strip()
+
+            # Parse fraction format (e.g., "30000/1001" for 29.97 fps)
+            if "/" in fps_str:
+                numerator, denominator = fps_str.split("/")
+                fps = float(numerator) / float(denominator)
+            else:
+                fps = float(fps_str)
+
+            # Validate FPS (typical range: 15-120 fps)
+            if FPS_VALID_RANGE_MIN <= fps <= FPS_VALID_RANGE_MAX:
+                logger.info("Detected video FPS: %.2f", fps)
+                return fps
+
+        logger.warning("Failed to detect FPS, using default: %.1f", DEFAULT_VIDEO_FPS)
+        return DEFAULT_VIDEO_FPS
+
+    except Exception as e:
+        logger.warning("FPS detection failed: %s, using default: %.1f", e, DEFAULT_VIDEO_FPS)
+        return DEFAULT_VIDEO_FPS
+
+
+async def validate_video_duration(
+    video_path: str,
+    max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
+    video_url: str | None = None,
+) -> None:
+    """
+    Validate that video duration does not exceed the maximum allowed duration.
+
+    Args:
+        video_path: Path to video file
+        max_duration_seconds: Maximum allowed duration in seconds
+        video_url: Optional pre-generated signed URL (avoids duplicate signing)
+
+    Raises:
+        VideoDurationExceededError: If video duration exceeds the limit
+        MediaValidationError: If video duration cannot be determined
+    """
+    duration = await get_video_duration(video_path, video_url=video_url)
+
+    if duration > max_duration_seconds:
+        max_minutes = max_duration_seconds // 60
+        actual_minutes = duration // 60
+        raise VideoDurationExceededError(
+            f"Video duration ({actual_minutes:.1f} minutes, {duration:.1f} seconds) "
+            f"exceeds maximum allowed duration ({max_minutes} minutes, {max_duration_seconds} seconds). "
+            f"Please upload a video that is {max_minutes} minutes or shorter."
+        )
 
 
 async def validate_and_load_content(sources: SourceMedia) -> dict[str, Any]:

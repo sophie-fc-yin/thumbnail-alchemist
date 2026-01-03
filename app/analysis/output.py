@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from google.cloud import storage  # type: ignore
+
 
 def build_comprehensive_analysis_json(
     project_id: str,
@@ -72,19 +74,13 @@ def build_comprehensive_analysis_json(
         # Stream B: Audio Saliency
         "stream_b": {
             "enabled": stream_b_results is not None,
-            "energy_peaks": stream_b_results.get("energy_peaks", []) if stream_b_results else [],
-            "spectral_changes": (
-                stream_b_results.get("spectral_changes", []) if stream_b_results else []
+            "saliency_segments": (
+                stream_b_results if stream_b_results and isinstance(stream_b_results, list) else []
             ),
-            "silence_to_impact": (
-                stream_b_results.get("silence_to_impact", []) if stream_b_results else []
-            ),
-            "non_speech_sounds": (
-                stream_b_results.get("non_speech_sounds", []) if stream_b_results else []
-            ),
-            "timeline": stream_b_results.get("saliency_timeline", []) if stream_b_results else [],
             "total_moments": (
-                len(stream_b_results.get("saliency_timeline", [])) if stream_b_results else 0
+                len(stream_b_results)
+                if stream_b_results and isinstance(stream_b_results, list)
+                else 0
             ),
         },
         # Visual Analysis
@@ -134,8 +130,6 @@ async def save_analysis_json_to_gcs(
         json_str = json.dumps(analysis_json, indent=2, ensure_ascii=False)
 
         # Upload to GCS
-        from google.cloud import storage  # type: ignore
-
         client = storage.Client()
         bucket = client.bucket(bucket_name)
 
