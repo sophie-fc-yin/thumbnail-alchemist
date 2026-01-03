@@ -1,15 +1,16 @@
 """Moment importance analysis for adaptive frame sampling.
 
-Fuses multiple signals (facial expression, audio, speech) to identify important moments.
-Higher importance = more frames needed around that moment to capture the best thumbnail.
+DEPRECATED: This module's functions have been replaced by the new adaptive sampling system.
+
+The old system used formula-based importance calculation with fixed intervals.
+The new system uses trigger-based multi-signal fusion with adaptive intervals.
+
+See: app/analysis/processing.py for the new implementation
 """
 
-from typing import Any
-
-import numpy as np
 
 # ============================================================================
-# CONSTANTS
+# CONSTANTS (Kept for reference, may be removed in future cleanup)
 # ============================================================================
 
 # Importance Score Weights
@@ -42,319 +43,24 @@ DEFAULT_SMOOTHING_WINDOW_SIZE = 5  # Window size for moving average
 MS_TO_SECONDS = 1000.0  # Milliseconds to seconds conversion factor
 
 
-def calculate_moment_importance(
-    expression_delta: float = 0.0,
-    landmark_motion: float = 0.0,
-    audio_energy_delta: float = 0.0,
-    speech_emotion_delta: float = 0.0,
-    audio_score: float = 0.0,
-    weights: dict[str, float] | None = None,
-) -> float:
-    """
-    Calculate moment importance by fusing multiple signals.
-
-    This is NOT machine learning - it's signal fusion.
-    Each signal is normalized to [0, 1] and weighted.
-
-    Args:
-        expression_delta: Change in facial expression intensity [0, 1]
-        landmark_motion: Facial landmark movement [0, 1]
-        audio_energy_delta: Change in audio energy [0, 1]
-        speech_emotion_delta: Change in speech prosody [0, 1]
-        audio_score: Comprehensive audio score (speech_gate × text_importance × emphasis × bgm_penalty) [0, 1]
-        weights: Optional custom weights. Defaults:
-            - expression: 0.25 (visual emotion is key for thumbnails)
-            - landmark: 0.15 (head movement, gestures)
-            - audio: 0.2 (catches music, excitement)
-            - speech: 0.15 (vocal emphasis)
-            - audio_score: 0.25 (comprehensive audio analysis)
-
-    Returns:
-        Importance score [0, 1] where:
-            - 0.0-0.3: Low importance (calm talking, slow scenes)
-            - 0.3-0.7: Medium importance (normal engagement)
-            - 0.7-1.0: High importance (emotional peaks, reveals, hooks)
-    """
-    if weights is None:
-        weights = {
-            "expression": 0.25,
-            "landmark": 0.15,
-            "audio": 0.2,
-            "speech": 0.15,
-            "audio_score": 0.25,  # Comprehensive audio signal
-        }
-
-    # Weighted sum
-    importance = (
-        weights["expression"] * expression_delta
-        + weights["landmark"] * landmark_motion
-        + weights["audio"] * audio_energy_delta
-        + weights["speech"] * speech_emotion_delta
-        + weights["audio_score"] * audio_score
-    )
-
-    # Clamp to [0, 1]
-    return float(min(max(importance, 0.0), 1.0))
-
-
-def importance_to_sampling_interval(
-    importance_score: float,
-    min_interval: float = 0.1,
-    max_interval: float = 2.0,
-) -> float:
-    """
-    Convert importance score to frame sampling interval.
-
-    Adaptive rule:
-        - Low importance (0.0-0.3) → 1.5-2.0s intervals (few frames)
-        - Medium importance (0.3-0.7) → 0.5-1.0s intervals (normal density)
-        - High importance (0.7-1.0) → 0.1-0.25s intervals (dense capture)
-
-    This mirrors how humans scrub video - skip through calm parts,
-    dense sampling around important moments (emotion reveals, hooks).
-
-    Args:
-        importance_score: Importance score [0, 1]
-        min_interval: Minimum sampling interval in seconds (default: 0.1s)
-        max_interval: Maximum sampling interval in seconds (default: 2.0s)
-
-    Returns:
-        Sampling interval in seconds
-    """
-    if importance_score < 0.3:
-        # Low importance: calm talking, slow scenes
-        # Linear interpolation: 1.5s → 2.0s as importance decreases
-        return 1.5 + (0.3 - importance_score) / 0.3 * 0.5
-
-    elif importance_score < 0.7:
-        # Medium importance: normal engagement
-        # Linear interpolation: 0.5s → 1.5s as importance decreases
-        return 0.5 + (0.7 - importance_score) / 0.4 * 1.0
-
-    else:
-        # High importance: emotional peaks, reveals, hooks
-        # Linear interpolation: 0.1s → 0.5s as importance decreases
-        return min_interval + (1.0 - importance_score) / 0.3 * 0.4
-
-
-def segment_video_by_importance(
-    importance_scores: list[float],
-    timestamps: list[float],
-    threshold: float = 0.2,
-    video_duration: float | None = None,
-) -> list[dict[str, Any]]:
-    """
-    Segment video into importance regions.
-
-    Groups consecutive similar-importance sections together.
-    Important: Segment BEFORE sampling to avoid missing transitions.
-
-    Args:
-        importance_scores: List of importance scores for each time point
-        timestamps: Corresponding timestamps in seconds
-        threshold: Importance change threshold to trigger new segment
-        video_duration: Total video duration (optional, for proper end time)
-
-    Returns:
-        List of segments with:
-            - start_time: Segment start in seconds
-            - end_time: Segment end in seconds
-            - avg_importance: Average importance score for segment
-            - importance_level: "low", "medium", or "high"
-    """
-    if not importance_scores or not timestamps:
-        return []
-
-    # Special case: very few samples - create full-duration segment
-    if len(timestamps) <= 2:
-        avg_importance = float(np.mean(importance_scores))
-        end_time = video_duration if video_duration else timestamps[-1]
-        # Ensure minimum duration
-        if end_time <= timestamps[0]:
-            end_time = timestamps[0] + 10.0  # Minimum 10 seconds
-
-        return [
-            {
-                "start_time": timestamps[0],
-                "end_time": end_time,
-                "avg_importance": avg_importance,
-                "importance_level": _categorize_importance(avg_importance),
-            }
-        ]
-
-    segments = []
-    current_start = timestamps[0]
-    current_scores = [importance_scores[0]]
-
-    for i in range(1, len(importance_scores)):
-        score = importance_scores[i]
-        prev_score = importance_scores[i - 1]
-
-        # Check if importance changed significantly
-        if abs(score - prev_score) > threshold:
-            # End current segment at midpoint between samples
-            midpoint = (timestamps[i - 1] + timestamps[i]) / 2.0
-            avg_importance = float(np.mean(current_scores))
-            segments.append(
-                {
-                    "start_time": current_start,
-                    "end_time": midpoint,
-                    "avg_importance": avg_importance,
-                    "importance_level": _categorize_importance(avg_importance),
-                }
-            )
-
-            # Start new segment at midpoint
-            current_start = midpoint
-            current_scores = [score]
-        else:
-            # Continue current segment
-            current_scores.append(score)
-
-    # Add final segment - extend to video duration if available
-    if current_scores:
-        avg_importance = float(np.mean(current_scores))
-        end_time = video_duration if video_duration else timestamps[-1]
-        # Ensure end_time is after start
-        if end_time <= current_start:
-            end_time = current_start + max(10.0, (timestamps[-1] - timestamps[0]) / len(timestamps))
-
-        segments.append(
-            {
-                "start_time": current_start,
-                "end_time": end_time,
-                "avg_importance": avg_importance,
-                "importance_level": _categorize_importance(avg_importance),
-            }
-        )
-
-    return segments
-
-
-def _categorize_importance(importance_score: float) -> str:
-    """Categorize importance score into low/medium/high."""
-    if importance_score < 0.3:
-        return "low"
-    elif importance_score < 0.7:
-        return "medium"
-    else:
-        return "high"
-
-
-def calculate_audio_energy_delta(
-    audio_timeline: list[dict[str, Any]],
-    window_size: int = 5,
-) -> list[float]:
-    """
-    Calculate audio energy change rate from timeline.
-
-    Args:
-        audio_timeline: Timeline from transcribe_and_analyze_audio
-        window_size: Number of time points to average over
-
-    Returns:
-        List of normalized energy deltas [0, 1]
-    """
-    if not audio_timeline:
-        return []
-
-    # Extract energy values from timeline (from energy peaks and segments)
-    energy_values = []
-    timestamps = []
-
-    for event in audio_timeline:
-        if event["type"] == "energy_peak":
-            energy_values.append(event["energy"])
-            timestamps.append(event["time_ms"] / 1000.0)  # Convert ms to seconds
-        elif event["type"] == "segment":
-            energy_values.append(event.get("avg_energy", 0.0))
-            timestamps.append(event["start_ms"] / 1000.0)  # Convert ms to seconds
-
-    if not energy_values:
-        return []
-
-    # Calculate deltas
-    deltas = []
-    for i in range(len(energy_values)):
-        if i == 0:
-            deltas.append(0.0)
-        else:
-            delta = abs(energy_values[i] - energy_values[i - 1])
-            deltas.append(delta)
-
-    # Smooth with moving average
-    smoothed = []
-    for i in range(len(deltas)):
-        start_idx = max(0, i - window_size // 2)
-        end_idx = min(len(deltas), i + window_size // 2 + 1)
-        avg_delta = np.mean(deltas[start_idx:end_idx])
-        smoothed.append(avg_delta)
-
-    # Normalize to [0, 1]
-    if max(smoothed) > 0:
-        normalized = [d / max(smoothed) for d in smoothed]
-    else:
-        normalized = smoothed
-
-    return normalized
-
-
-def calculate_speech_emotion_delta(
-    audio_timeline: list[dict[str, Any]],
-    window_size: int = 5,
-) -> list[float]:
-    """
-    Calculate speech emotion change rate from timeline.
-
-    Uses pitch variance and energy as proxies for emotional intensity.
-
-    Args:
-        audio_timeline: Timeline from transcribe_and_analyze_audio
-        window_size: Number of time points to average over
-
-    Returns:
-        List of normalized emotion deltas [0, 1]
-    """
-    if not audio_timeline:
-        return []
-
-    # Extract emotion proxies (pitch + energy) from segments
-    emotion_values = []
-    timestamps = []
-
-    for event in audio_timeline:
-        if event["type"] == "segment":
-            # Combine pitch and energy as emotion proxy
-            pitch = event.get("avg_pitch", 0.0)
-            energy = event.get("avg_energy", 0.0)
-            emotion = (pitch + energy) / 2.0
-            emotion_values.append(emotion)
-            timestamps.append(event["start_ms"] / 1000.0)  # Convert ms to seconds
-
-    if not emotion_values:
-        return []
-
-    # Calculate deltas
-    deltas = []
-    for i in range(len(emotion_values)):
-        if i == 0:
-            deltas.append(0.0)
-        else:
-            delta = abs(emotion_values[i] - emotion_values[i - 1])
-            deltas.append(delta)
-
-    # Smooth with moving average
-    smoothed = []
-    for i in range(len(deltas)):
-        start_idx = max(0, i - window_size // 2)
-        end_idx = min(len(deltas), i + window_size // 2 + 1)
-        avg_delta = np.mean(deltas[start_idx:end_idx])
-        smoothed.append(avg_delta)
-
-    # Normalize to [0, 1]
-    if max(smoothed) > 0:
-        normalized = [d / max(smoothed) for d in smoothed]
-    else:
-        normalized = smoothed
-
-    return normalized
+# ============================================================================
+# DEPRECATED: Legacy Importance Calculation Functions
+# ============================================================================
+# All functions in this module have been replaced by the new adaptive sampling system.
+#
+# Deleted functions (formerly lines 45-360):
+# - calculate_moment_importance() → Replaced by trigger-based weighting
+# - importance_to_sampling_interval() → Replaced by get_adaptive_intervals()
+# - segment_video_by_importance() → Replaced by _calculate_importance_segments()
+# - calculate_audio_energy_delta() → No longer needed
+# - calculate_speech_emotion_delta() → No longer needed
+# - _categorize_importance() → No longer needed
+#
+# New system location:
+# - app/analysis/processing.py::get_adaptive_intervals()
+# - app/analysis/processing.py::_calculate_importance_segments()
+# - app/analysis/processing.py::_assign_sampling_intervals()
+#
+# See git history for the old implementation if needed for reference.
+# This file can be deleted entirely once all references are confirmed removed.
+# ============================================================================

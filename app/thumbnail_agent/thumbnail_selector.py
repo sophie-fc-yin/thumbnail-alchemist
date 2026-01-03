@@ -25,7 +25,7 @@ from app.thumbnail_agent.contextual_scoring import (
     ContextualScoringCriteria,
     get_contextual_scores,
 )
-from app.thumbnail_agent.scoring_weights import get_scoring_weights
+from app.thumbnail_agent.scoring_weights import determine_optimal_weights
 
 
 class ThumbnailSelector:
@@ -237,6 +237,7 @@ class ThumbnailSelector:
         # Add metadata to the result
         result["all_frame_scores"] = scored_frames  # Keep all scores (deduped) for reference
         result["gemini_model"] = self.model_name
+        result["frames_sent_to_gemini"] = top_frames  # Frames sent to Gemini for analysis
 
         # Estimate cost based on frames actually sent to Gemini
         result["cost_usd"] = self._estimate_cost(len(top_frames))
@@ -279,14 +280,16 @@ class ThumbnailSelector:
         Returns:
             List of frames with computed scores
         """
-        # Get niche-specific weights
-        weights = get_scoring_weights(profile)
+        # Get optimal weights from agent (falls back to niche preset if fails)
+        weights = await determine_optimal_weights(brief, profile, model_name=self.model_name)
 
-        print(f"Using {profile.get('niche', 'default')} niche weights:")
+        print(f"Scoring weights for {profile.get('niche', 'default')}:")
         print(f"  Aesthetic: {weights['aesthetic_quality']:.0%}")
         print(f"  Psychology: {weights['psychology_score']:.0%}")
         print(f"  Editability: {weights['editability']:.0%}")
         print(f"  Face: {weights['face_quality']:.0%}")
+        print(f"  Creator Alignment: {weights['creator_alignment']:.0%}")
+        print(f"  Moment Importance: {weights['moment_importance']:.0%}")
 
         scored_frames = []
 
@@ -676,8 +679,20 @@ CRITICAL: Base analysis on VISUAL assessment of actual images, not just score da
             }
         """
         try:
-            # Read image
-            img = cv2.imread(image_path)
+            # Check if file exists before attempting to read
+            image_path_obj = Path(image_path)
+            if not image_path_obj.exists():
+                return {
+                    "brightness": 0.5,
+                    "subject_brightness": 0.5,
+                    "contrast": 0.5,
+                    "is_too_dark": False,
+                    "is_too_bright": False,
+                    "mean_brightness": 128,
+                }
+
+            # Load image
+            img = cv2.imread(str(image_path))
             if img is None:
                 return {
                     "brightness": 0.5,
@@ -1051,15 +1066,49 @@ CRITICAL: Base analysis on VISUAL assessment of actual images, not just score da
             # Video too short for meaningful diversity
             return frames[:target_count]
 
-        # Strategy: Divide video into segments and ensure coverage
-        # Use 4-5 segments to balance between coverage and quality
-        num_segments = min(5, target_count)
+        # STRATEGY: If frames are already pre-selected from importance segments (close to target),
+        # just apply min_gap filter instead of creating uniform segments
+        # This avoids empty segments when frames are clustered in important regions
+        if (
+            len(frames) <= target_count * 1.6
+        ):  # Within 60% of target (e.g., 16 frames for target=10)
+            print(
+                f"\n[TEMPORAL DIVERSITY] Using pre-selected importance frames ({len(frames)} frames):"
+            )
+            print(f"  Applying min_gap filter ({min_gap_seconds}s) to select top {target_count}...")
+
+            selected = []
+            for frame in frames:  # Already sorted by score (descending)
+                ts = frame.get("timestamp", 0.0)
+
+                # Check minimum gap from all selected frames
+                too_close = any(
+                    abs(ts - sel_frame.get("timestamp", 0.0)) < min_gap_seconds
+                    for sel_frame in selected
+                )
+
+                if not too_close:
+                    selected.append(frame)
+                    print(f"  ✓ Frame @ {ts:.1f}s (score: {frame.get('total_score', 0):.3f})")
+
+                if len(selected) >= target_count:
+                    break
+
+            print(f"[TEMPORAL DIVERSITY] Selected {len(selected)} frames from importance segments")
+            return selected[:target_count]
+
+        # FALLBACK: If many frames (not pre-selected), use uniform segmentation
+        # This guarantees one frame from each portion of the video
+        num_segments = target_count
         segment_duration = duration / num_segments
 
         selected = []
-        segment_selections = []
 
-        # Phase 1: Select best frame from each segment
+        print(
+            f"\n[TEMPORAL DIVERSITY] Dividing {duration:.1f}s video into {num_segments} segments:"
+        )
+
+        # Select EXACTLY ONE best frame from each segment
         for seg_idx in range(num_segments):
             seg_start = min_ts + (seg_idx * segment_duration)
             seg_end = seg_start + segment_duration
@@ -1068,42 +1117,47 @@ CRITICAL: Base analysis on VISUAL assessment of actual images, not just score da
             segment_frames = [f for f in frames if seg_start <= f.get("timestamp", 0.0) < seg_end]
 
             if segment_frames:
-                # Take best frame from segment
+                # Take best scored frame from this segment
                 best_in_segment = segment_frames[0]  # Already sorted by score
-                segment_selections.append(best_in_segment)
+                selected.append(best_in_segment)
+                print(
+                    f"  Segment {seg_idx+1} ({seg_start:.1f}s-{seg_end:.1f}s): frame @ {best_in_segment.get('timestamp'):.1f}s (score: {best_in_segment.get('total_score', 0):.3f})"
+                )
+            else:
+                print(f"  Segment {seg_idx+1} ({seg_start:.1f}s-{seg_end:.1f}s): NO FRAMES")
 
-        # Phase 2: Apply temporal deduplication to segment selections
-        segment_selections.sort(key=lambda x: x.get("total_score", 0.0), reverse=True)
-        last_ts = None
-        for frame in segment_selections:
-            ts = frame.get("timestamp", 0.0)
-            if last_ts is None or abs(ts - last_ts) >= min_gap_seconds:
-                selected.append(frame)
-                last_ts = ts
-
-        # Phase 3: Fill remaining slots with highest-scored frames
+        # If we didn't get enough frames (some segments were empty),
+        # fill remaining slots from other segments while respecting min_gap
         if len(selected) < target_count:
-            for frame in frames:
-                if frame in selected:
-                    continue
+            print(
+                f"\n[TEMPORAL DIVERSITY] Only found {len(selected)}/{target_count} frames, filling remaining..."
+            )
 
+            # Get frames not yet selected, sorted by score
+            remaining = [f for f in frames if f not in selected]
+
+            for frame in remaining:
                 ts = frame.get("timestamp", 0.0)
 
-                # Check if far enough from all selected frames
-                too_close = False
-                for sel_frame in selected:
-                    if abs(ts - sel_frame.get("timestamp", 0.0)) < min_gap_seconds:
-                        too_close = True
-                        break
+                # Check minimum gap from all selected frames
+                too_close = any(
+                    abs(ts - sel_frame.get("timestamp", 0.0)) < min_gap_seconds
+                    for sel_frame in selected
+                )
 
                 if not too_close:
                     selected.append(frame)
+                    print(f"  Added frame @ {ts:.1f}s")
 
                 if len(selected) >= target_count:
                     break
 
-        # Sort by score for consistency
+        # Sort by score for final ranking
         selected.sort(key=lambda x: x.get("total_score", 0.0), reverse=True)
+
+        print(
+            f"[TEMPORAL DIVERSITY] Final: {len(selected)} frames, range: {min([f.get('timestamp', 0) for f in selected]):.1f}s - {max([f.get('timestamp', 0) for f in selected]):.1f}s"
+        )
 
         return selected[:target_count]
 

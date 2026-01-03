@@ -35,12 +35,23 @@ from app.models.upload import (
 # Vision models
 from app.models.vision import (
     AdaptiveSamplingResponse,
+    AestheticsScores,
+    CompositionScores,
+    EditabilityScores,
+    FaceQualityScores,
     FrameScore,
+    FrameWithFeatures,
+    ImageQuality,
     ImportanceSegment,
     ImportanceStatistics,
+    ProcessImportantMomentsRequest,
+    ProcessImportantMomentsResponse,
     ProcessingStats,
+    TechnicalQuality,
     VisionBreakdownRequest,
     VisionBreakdownResponse,
+    VisionFeaturesRequest,
+    VisionFeaturesResponse,
 )
 
 __all__ = [
@@ -51,12 +62,23 @@ __all__ = [
     "AudioBreakdownResponse",
     # Vision
     "AdaptiveSamplingResponse",
+    "AestheticsScores",
+    "CompositionScores",
+    "EditabilityScores",
+    "FaceQualityScores",
     "FrameScore",
+    "ImageQuality",
     "ImportanceSegment",
     "ImportanceStatistics",
     "ProcessingStats",
+    "TechnicalQuality",
     "VisionBreakdownRequest",
     "VisionBreakdownResponse",
+    "VisionFeaturesRequest",
+    "VisionFeaturesResponse",
+    "ProcessImportantMomentsRequest",
+    "ProcessImportantMomentsResponse",
+    "FrameWithFeatures",
     # Thumbnail
     "ChannelProfile",
     "CompositionLayer",

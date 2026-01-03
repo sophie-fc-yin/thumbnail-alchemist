@@ -49,6 +49,7 @@ from app.constants import (
     TRANSCRIPTION_TIMEOUT,
 )
 from app.models import SourceMedia
+from app.utils.storage import upload_json_to_gcs
 from app.vision.extraction import MediaValidationError, generate_signed_url
 
 logger = logging.getLogger(__name__)
@@ -442,8 +443,6 @@ async def transcribe_speech_audio(
         # Save speech audio transcript to JSON if requested
         if save_timeline:
             # Upload directly to GCS from memory
-            from app.utils.storage import upload_json_to_gcs
-
             gcs_url = upload_json_to_gcs(
                 data=result,
                 project_id=project_id,

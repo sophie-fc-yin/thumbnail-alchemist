@@ -9,7 +9,11 @@ Different YouTube niches prioritize different factors:
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any
+
+from google.genai import Client
 
 
 class ScoringWeights:
@@ -414,3 +418,125 @@ def preview_niche_weights(niche_preset: str) -> dict[str, float] | None:
         Weights dictionary or None if preset not found
     """
     return ScoringWeights.NICHE_PRESETS.get(niche_preset)
+
+
+async def determine_optimal_weights(
+    brief: dict[str, Any],
+    profile: dict[str, Any],
+    model_name: str = "gemini-2.0-flash-exp",
+) -> dict[str, float]:
+    """
+    Use Gemini to determine optimal scoring weights based on creative brief and channel profile.
+
+    This analyzes the creator's content style, goals, and niche to return personalized
+    scoring weights instead of using hardcoded niche presets.
+
+    Args:
+        brief: Creative brief with video_title, primary_message, tone, primary_goal
+        profile: Channel profile with niche, personality, visual_style
+        model_name: Gemini model to use (default: gemini-2.0-flash-exp)
+
+    Returns:
+        Dictionary of scoring weights (falls back to niche preset if agent fails)
+
+    Example:
+        >>> brief = {
+        ...     "video_title": "Exploring New Orleans",
+        ...     "primary_message": "Genuine reactions to NOLA",
+        ...     "tone": "casual",
+        ...     "primary_goal": "subscriber growth"
+        ... }
+        >>> profile = {"niche": "travel vlog"}
+        >>> weights = await determine_optimal_weights(brief, profile)
+        >>> weights["face_quality"]
+        0.18  # Boosted for reaction-focused content
+    """
+    try:
+        # Get Gemini API key
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            print("[AGENT WEIGHTS] GEMINI_API_KEY not set, falling back to niche preset")
+            return get_scoring_weights(profile)
+
+        # Create client
+        client = Client(api_key=api_key)
+
+        prompt = f"""Analyze this creator's content style and determine optimal scoring weights for thumbnail selection.
+
+CREATIVE BRIEF:
+- Video title: {brief.get('video_title', 'N/A')}
+- Message: {brief.get('primary_message', 'N/A')}
+- Tone: {brief.get('tone', 'N/A')}
+- Goal: {brief.get('primary_goal', 'N/A')}
+
+CHANNEL PROFILE:
+- Niche: {profile.get('niche', 'N/A')}
+- Personality: {profile.get('personality', 'N/A')}
+- Visual style: {profile.get('visual_style', 'N/A')}
+
+Return ONLY a JSON object with weights and reasoning:
+{{
+  "weights": {{
+    "moment_importance": 0.XX,
+    "creator_alignment": 0.XX,
+    "aesthetic_quality": 0.XX,
+    "psychology_score": 0.XX,
+    "editability": 0.XX,
+    "face_quality": 0.XX,
+    "composition": 0.XX,
+    "technical_quality": 0.XX
+  }},
+  "reasoning": "2-3 sentence explanation of why these weights fit this creator's style and goals"
+}}
+
+Guidelines:
+- Reaction/vlog content: boost face_quality (15-20%)
+- Educational/how-to: boost psychology_score (20-25%)
+- Aesthetic-focused: boost aesthetic_quality (25-30%)
+- CTR optimization: boost psychology_score + editability
+- Subscriber growth: boost face_quality + creator_alignment
+- All values 0.0-1.0, total must equal 1.0"""
+
+        response = await client.aio.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config={
+                "temperature": 0.3,
+                "response_mime_type": "application/json",
+            },
+        )
+
+        # Parse response
+        response_json = json.loads(response.text)
+
+        # Extract weights and reasoning
+        weights_json = response_json.get("weights", {})
+        reasoning = response_json.get("reasoning", "No reasoning provided")
+
+        # Validate weights
+        required_keys = [
+            "moment_importance",
+            "creator_alignment",
+            "aesthetic_quality",
+            "psychology_score",
+            "editability",
+            "face_quality",
+            "composition",
+            "technical_quality",
+        ]
+
+        if not all(k in weights_json for k in required_keys):
+            raise ValueError("Missing required weight keys")
+
+        # Normalize to ensure sum = 1.0
+        total = sum(weights_json.values())
+        if abs(total - 1.0) > 0.01:
+            weights_json = {k: v / total for k, v in weights_json.items()}
+
+        print("[AGENT WEIGHTS] Determined custom weights based on brief + profile")
+        print(f"[AGENT WEIGHTS] Reasoning: {reasoning}")
+        return weights_json
+
+    except Exception as e:
+        print(f"[AGENT WEIGHTS] Failed to determine weights ({e}), falling back to niche preset")
+        return get_scoring_weights(profile)
