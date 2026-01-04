@@ -752,7 +752,7 @@ async def analyze_speech(
 
         # Find and append matching narrative moments (same start/end format as segments)
         segment["narrative_context"] = []
-    for moment in narrative_moments:
+        for moment in narrative_moments:
             # Narrative moments have start/end from their source segment - direct match
             moment_start = moment.get("start", 0.0)
             moment_end = moment.get("end", 0.0)
