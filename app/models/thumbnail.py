@@ -7,82 +7,91 @@ from pydantic import BaseModel, Field, HttpUrl
 from app.models.media import SourceMedia
 
 
-class Target(BaseModel):
-    """Target platform and optimization settings."""
+class CreatorContext(BaseModel):
+    """
+    Creator context signals for autonomous packaging.
 
-    platform: str = Field(
-        "youtube",
-        description="Platform/orientation to optimize for (e.g. YouTube, Shorts, Reels, TikTok).",
-    )
-    optimization: Optional[str] = Field(
-        None, description="Primary KPI to optimize for, e.g. CTR or retention."
-    )
-    audience_profile: Optional[str] = Field(
-        None,
-        description="Target audience description (e.g., 'tech-savvy millennials', 'beginner programmers', 'gaming enthusiasts ages 18-25'). Helps tailor thumbnail style and appeal.",
-        max_length=200,
-    )
+    The system autonomously decides how content should be packaged,
+    but strongly respects these creator signals when provided.
+    """
 
-
-class ChannelProfile(BaseModel):
-    """Information about the creator's channel and growth stage."""
-
-    stage: Optional[str] = Field(
-        None,
-        description="Channel growth stage (e.g., 'new/starter', 'growing', 'established', 'large/mainstream'). Affects thumbnail strategy.",
-        max_length=50,
-    )
-    subscriber_count: Optional[int] = Field(
-        None,
-        description="Approximate subscriber count (helps determine appropriate thumbnail approach).",
-        ge=0,
-    )
-    content_niche: Optional[str] = Field(
+    niche_hint: Optional[str] = Field(
         None,
         description=(
-            "Primary content category or niche. Affects scoring weights, aesthetic criteria, and advisory guidance. "
-            "Supported niches: 'gaming', 'tech'/'tech reviews'/'educational', 'beauty'/'lifestyle', "
-            "'commentary'/'reaction', 'cooking'/'food', 'fitness'/'health', 'business'/'finance', "
-            "'entertainment'/'comedy', 'music', 'news'/'journalism'. "
-            "Defaults to 'general' if not specified."
+            "Content category signal (e.g., 'travel', 'tech', 'cooking'). "
+            "When provided, system prioritizes this over inferred category. "
+            "System analyzes content but defers to creator's understanding of their niche."
         ),
-        max_length=100,
+        max_length=80,
     )
-    upload_frequency: Optional[str] = Field(
+
+    maturity_hint: Optional[str] = Field(
         None,
-        description="How often content is published (e.g., 'daily', 'weekly', 'monthly'). Affects consistency expectations.",
-        max_length=50,
-    )
-    growth_goal: Optional[str] = Field(
-        None,
-        description="Primary growth objective (e.g., 'build authority', 'viral reach', 'loyal community', 'monetization').",
-        max_length=100,
+        description=(
+            "Channel maturity signal (e.g., 'early', 'mid', 'established'). "
+            "When provided, system adjusts packaging strategy accordingly. "
+            "Helps calibrate tone and approach to match channel stage."
+        ),
+        max_length=40,
     )
 
 
-class CreativeBrief(BaseModel):
-    """Creative direction and brand guidelines for the thumbnail design."""
+class CreativeDirection(BaseModel):
+    """
+    Creative direction signals in natural language.
+
+    The system makes autonomous packaging decisions, but treats these signals
+    as strong guidance that shapes how content is presented.
+    """
 
     mood: Optional[str] = Field(
         None,
-        description="Desired tone or vibe, e.g. 'dramatic, high-contrast, cinematic'.",
+        description=(
+            "Desired vibe or tone (e.g., 'dramatic', 'calm', 'authentic'). "
+            "System strongly aligns moment selection and presentation with this mood. "
+            "Natural language - describe how you want the moment to feel."
+        ),
         max_length=120,
     )
+
     title_hint: Optional[str] = Field(
-        None, description="Optional working title or topic to steer the concept."
+        None,
+        description=(
+            "Working title or topic for this video. "
+            "System uses this to understand content theme and select moments that align. "
+            "Strong signal for what the video is about."
+        ),
+        max_length=120,
     )
-    brand_colors: list[str] = Field(
-        default_factory=list, description="Preferred colors as names or hex codes."
+
+    visual_preferences: Optional[str] = Field(
+        None,
+        description=(
+            "Visual preferences in natural language (e.g., 'face-focused', 'show the scenery', 'high energy', 'avoid close-ups'). "
+            "System prioritizes these preferences when scoring and selecting moments. "
+            "Strong signal for visual style."
+        ),
+        max_length=200,
     )
+
     notes: Optional[str] = Field(
         None,
-        description="Any extra creative guidance or constraints.",
-        max_length=1000,
+        description=(
+            "Additional context about this specific video. "
+            "System interprets this as important creative direction. "
+            "Use this to emphasize what matters for this content."
+        ),
+        max_length=500,
     )
 
 
 class ThumbnailRequest(BaseModel):
-    """Payload describing the creative intent for a thumbnail."""
+    """
+    Request for autonomous content packaging.
+
+    The system analyzes video content to determine optimal moment selection and presentation.
+    All context fields are optional hints that guide, but don't prescribe, the system's decisions.
+    """
 
     project_id: Optional[str] = Field(
         None,
@@ -90,23 +99,19 @@ class ThumbnailRequest(BaseModel):
     )
     content_sources: SourceMedia = Field(
         ...,
-        description="Video and images from the actual content being thumbnailed - provides context for background, composition, and theme.",
+        description="Video content to analyze and package. The system will extract and analyze key moments autonomously.",
     )
     profile_photos: list[str] = Field(
         default_factory=list,
-        description="URLs or paths to creator photos (https://storage.googleapis.com/... or local paths) to create the user avatar for the thumbnail design.",
+        description="Optional creator photos for avatar extraction (https://storage.googleapis.com/... or local paths).",
     )
-    target: Target = Field(
-        default_factory=Target,
-        description="Target platform and optimization settings.",
+    creator_context: CreatorContext = Field(
+        default_factory=CreatorContext,
+        description="Optional lightweight hints about creator and channel. Used only when content analysis is ambiguous.",
     )
-    channel_profile: ChannelProfile = Field(
-        default_factory=ChannelProfile,
-        description="Information about the creator's channel stage, niche, and growth goals.",
-    )
-    creative_brief: CreativeBrief = Field(
-        default_factory=CreativeBrief,
-        description="Creative direction and brand guidelines for the design.",
+    creative_direction: CreativeDirection = Field(
+        default_factory=CreativeDirection,
+        description="Optional creative preferences in natural language. Guides style without overriding content-driven decisions.",
     )
 
     model_config = {
@@ -120,22 +125,13 @@ class ThumbnailRequest(BaseModel):
                     "profile_photos": [
                         "https://storage.cloud.google.com/clickmoment-prod-assets/users/120accfe-aa23-41a3-b04f-36f581714d52/avatar/headshot.jpg"
                     ],
-                    "target": {
-                        "platform": "youtube",
-                        "optimization": "subscriber growth",
-                        "audience_profile": "travel enthusiasts and people curious about New Orleans, ages 20-45",
+                    "creator_context": {
+                        "niche_hint": "travel",
+                        "maturity_hint": "early",
                     },
-                    "channel_profile": {
-                        "stage": "new/starter",
-                        "subscriber_count": 0,
-                        "content_niche": "travel",
-                        "upload_frequency": "as I travel",
-                        "growth_goal": "build community",
-                    },
-                    "creative_brief": {
+                    "creative_direction": {
                         "mood": "casual, authentic, chill with energetic moments",
                         "title_hint": "Exploring New Orleans for the First Time | What to See & Do",
-                        "brand_colors": [],
                         "notes": "Genuine reactions, mix of calm sightseeing and fun event moments. Show the real NOLA experience - food, culture, music, and hidden spots.",
                     },
                 }
@@ -274,11 +270,11 @@ class ClickMomentPhase1(BaseModel):
 
 
 class ThumbnailResponse(BaseModel):
-    """Response from thumbnail generation endpoint with AI advisory."""
+    """Response from autonomous content packaging system."""
 
     project_id: str
     status: Literal["draft", "final"]
-    recommended_title: str
+    title_hint: str = Field(..., description="Creator's provided title hint (passed through)")
 
     # Legacy fields (for backwards compatibility)
     thumbnail_url: HttpUrl = Field(..., description="Default/safe option frame URL")

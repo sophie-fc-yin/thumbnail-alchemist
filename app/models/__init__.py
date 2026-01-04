@@ -14,10 +14,9 @@ from app.models.media import SourceMedia
 
 # Thumbnail models
 from app.models.thumbnail import (
-    ChannelProfile,
     CompositionLayer,
-    CreativeBrief,
-    Target,
+    CreativeDirection,
+    CreatorContext,
     ThumbnailRequest,
     ThumbnailResponse,
 )
@@ -80,10 +79,9 @@ __all__ = [
     "ProcessImportantMomentsResponse",
     "FrameWithFeatures",
     # Thumbnail
-    "ChannelProfile",
     "CompositionLayer",
-    "CreativeBrief",
-    "Target",
+    "CreativeDirection",
+    "CreatorContext",
     "ThumbnailRequest",
     "ThumbnailResponse",
     # Upload

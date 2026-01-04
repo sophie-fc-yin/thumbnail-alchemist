@@ -461,18 +461,20 @@ async def determine_optimal_weights(
         # Create client
         client = Client(api_key=api_key)
 
-        prompt = f"""Analyze this creator's content style and determine optimal scoring weights for thumbnail selection.
+        prompt = f"""Analyze this creator's content and determine optimal scoring weights for thumbnail selection.
 
-CREATIVE BRIEF:
+IMPORTANT: Treat creator-provided signals as STRONG guidance. When the creator specifies preferences, prioritize those heavily.
+
+CREATOR SIGNALS (high priority):
 - Video title: {brief.get('video_title', 'N/A')}
-- Message: {brief.get('primary_message', 'N/A')}
-- Tone: {brief.get('tone', 'N/A')}
-- Goal: {brief.get('primary_goal', 'N/A')}
-
-CHANNEL PROFILE:
-- Niche: {profile.get('niche', 'N/A')}
-- Personality: {profile.get('personality', 'N/A')}
+- Creative direction: {brief.get('primary_message', 'N/A')}
+- Desired tone: {brief.get('tone', 'N/A')}
+- Content niche: {profile.get('niche', 'N/A')}
 - Visual style: {profile.get('visual_style', 'N/A')}
+
+SYSTEM INFERENCES (secondary):
+- Optimization goal: {brief.get('primary_goal', 'N/A')} (inferred from content)
+- Personality traits: {profile.get('personality', 'N/A')} (inferred from tone)
 
 Return ONLY a JSON object with weights and reasoning:
 {{
@@ -490,11 +492,14 @@ Return ONLY a JSON object with weights and reasoning:
 }}
 
 Guidelines:
+- PRIORITIZE creator's stated tone and visual style preferences
+- If creator emphasizes authenticity/reactions: boost face_quality (18-22%)
+- If creator emphasizes visuals/scenery: boost aesthetic_quality (25-30%)
+- If creator wants energy/action: boost psychology_score (20-25%)
 - Reaction/vlog content: boost face_quality (15-20%)
 - Educational/how-to: boost psychology_score (20-25%)
 - Aesthetic-focused: boost aesthetic_quality (25-30%)
-- CTR optimization: boost psychology_score + editability
-- Subscriber growth: boost face_quality + creator_alignment
+- Creator alignment should be weighted highly (18-25%) to respect stated preferences
 - All values 0.0-1.0, total must equal 1.0"""
 
         response = await client.aio.models.generate_content(
