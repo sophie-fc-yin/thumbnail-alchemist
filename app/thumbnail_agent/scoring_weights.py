@@ -506,7 +506,7 @@ Guidelines:
             model=model_name,
             contents=prompt,
             config={
-                "temperature": 0.3,
+                "temperature": 0.0,  # Zero temperature for deterministic weight determination
                 "response_mime_type": "application/json",
             },
         )

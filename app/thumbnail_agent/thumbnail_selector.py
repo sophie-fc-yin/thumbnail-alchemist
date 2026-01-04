@@ -471,7 +471,7 @@ class ThumbnailSelector:
             contents=[prompt, *image_parts],
             config={
                 "response_mime_type": "application/json",
-                "temperature": 0.2,  # Low temperature for factual, deterministic output
+                "temperature": 0.0,  # Zero temperature for deterministic, consistent analysis
             },
         )
 
