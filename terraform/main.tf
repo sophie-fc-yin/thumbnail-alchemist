@@ -47,6 +47,20 @@ resource "google_cloud_run_v2_service" "thumbnail_alchemist" {
         value = var.environment
       }
 
+      # Suppress PyTorch NNPACK warnings
+      env {
+        name  = "PYTORCH_DISABLE_NNPACK"
+        value = "1"
+      }
+      env {
+        name  = "TORCH_NNPACK_DISABLE"
+        value = "1"
+      }
+      env {
+        name  = "OMP_NUM_THREADS"
+        value = "1"
+      }
+
       # Mount secrets from Secret Manager
       env {
         name = "OPENAI_API_KEY"

@@ -1,26 +1,61 @@
 import logging
 import os
 import re
+import sys
 import time
 import warnings
 from pathlib import Path
 from uuid import uuid4
 
-import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+# CRITICAL: Set PyTorch environment variables BEFORE any torch imports
+# This prevents NNPACK warnings from being printed to stderr
+os.environ.setdefault("PYTORCH_DISABLE_NNPACK", "1")
+os.environ.setdefault("TORCH_NNPACK_DISABLE", "1")
 
-from app.analysis.adaptive_sampling import cleanup_local_frames, orchestrate_adaptive_sampling
-from app.analysis.processing import (
+
+# Filter stderr to suppress NNPACK warnings from PyTorch C++ code
+class NNPACKFilter:
+    """Filter stderr to suppress NNPACK warnings from PyTorch."""
+
+    def __init__(self, original_stderr):
+        self.original_stderr = original_stderr
+        self.enabled = True
+
+    def write(self, message):
+        if self.enabled and "NNPACK" in message:
+            # Suppress NNPACK warnings
+            return
+        self.original_stderr.write(message)
+
+    def flush(self):
+        self.original_stderr.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.original_stderr, name)
+
+
+# Install stderr filter before any PyTorch imports
+_nnpack_filter = NNPACKFilter(sys.stderr)
+sys.stderr = _nnpack_filter
+
+import uvicorn  # noqa: E402
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+from app.analysis.adaptive_sampling import (  # noqa: E402
+    cleanup_local_frames,
+    orchestrate_adaptive_sampling,
+)
+from app.analysis.processing import (  # noqa: E402
     identify_important_moments,
     process_audio_analysis,
     process_initial_vision_analysis,
 )
-from app.models.thumbnail import ClickMomentPhase1, Phase1MomentInsight, Phase1Pillars
-from app.thumbnail_agent import ThumbnailSelector
-from app.vision.extraction import generate_signed_url
+from app.models.thumbnail import ClickMomentPhase1, Phase1MomentInsight, Phase1Pillars  # noqa: E402
+from app.thumbnail_agent import ThumbnailSelector  # noqa: E402
+from app.vision.extraction import generate_signed_url  # noqa: E402
 
 # Configure logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
@@ -37,7 +72,7 @@ app_log_level = getattr(logging, LOG_LEVEL, logging.DEBUG)
 for logger_name in ["app", "uvicorn.access"]:
     logging.getLogger(logger_name).setLevel(app_log_level)
 
-# Suppress NNPACK warnings from PyTorch (harmless, just noise)
+# Additional suppression (backup - stderr filter handles most cases)
 warnings.filterwarnings("ignore", message=".*NNPACK.*")
 logging.getLogger("torch").setLevel(logging.ERROR)
 

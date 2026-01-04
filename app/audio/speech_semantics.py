@@ -17,6 +17,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+# Disable NNPACK before PyTorch import to suppress warnings
+os.environ.setdefault("PYTORCH_DISABLE_NNPACK", "1")
+os.environ.setdefault("TORCH_NNPACK_DISABLE", "1")
+
 import librosa
 import numpy as np
 import torch
@@ -748,7 +752,7 @@ async def analyze_speech(
 
         # Find and append matching narrative moments (same start/end format as segments)
         segment["narrative_context"] = []
-        for moment in narrative_moments:
+    for moment in narrative_moments:
             # Narrative moments have start/end from their source segment - direct match
             moment_start = moment.get("start", 0.0)
             moment_end = moment.get("end", 0.0)

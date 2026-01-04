@@ -9,8 +9,13 @@ This module provides speech/non-speech separation:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
+
+# Disable NNPACK before PyTorch import to suppress warnings
+os.environ.setdefault("PYTORCH_DISABLE_NNPACK", "1")
+os.environ.setdefault("TORCH_NNPACK_DISABLE", "1")
 
 import librosa
 import numpy as np
