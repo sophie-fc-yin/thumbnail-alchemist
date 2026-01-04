@@ -631,8 +631,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
             return ThumbnailResponse(
                 project_id=project_id,
                 status="draft",
-                recommended_title=payload.creative_brief.title_hint
-                or "ClickMoment Phase-1 (image-only)",
+                title_hint=payload.creative_direction.title_hint or "Untitled",
                 thumbnail_url=first,
                 selected_frame_url=first,
                 profile_variant_url=None,
@@ -814,20 +813,21 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     logger.info("STEP 2: Preparing Thumbnail Selection Agent")
     logger.info("─" * 70)
 
-    # Map creative brief
+    # Map creative direction to selector format
     selector_brief = {
-        "video_title": payload.creative_brief.title_hint or "Untitled Video",
-        "primary_message": payload.creative_brief.notes or "No description provided",
-        "target_emotion": "curiosity",  # Default
-        "primary_goal": _map_optimization_to_goal(payload.target.optimization),
-        "tone": _infer_tone_from_mood(payload.creative_brief.mood),
+        "video_title": payload.creative_direction.title_hint or "Untitled Video",
+        "primary_message": payload.creative_direction.notes or "No description provided",
+        "target_emotion": "curiosity",  # System determines from content
+        "primary_goal": "maximize_ctr",  # System determines autonomously from content analysis
+        "tone": _infer_tone_from_mood(payload.creative_direction.mood),
     }
 
-    # Map channel profile
+    # Map creator context to selector format
     selector_profile = {
-        "niche": payload.channel_profile.content_niche or "general",
-        "personality": _infer_personality(payload.creative_brief.mood),
-        "visual_style": _infer_visual_style(payload.creative_brief.mood),
+        "niche": payload.creator_context.niche_hint
+        or "general",  # Weak signal, system infers from content
+        "personality": _infer_personality(payload.creative_direction.mood),
+        "visual_style": _infer_visual_style(payload.creative_direction.mood),
     }
 
     logger.info(
@@ -858,7 +858,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         return ThumbnailResponse(
             project_id=project_id,
             status="draft",
-            recommended_title=payload.creative_brief.title_hint or "AI-Generated Thumbnail",
+            title_hint=payload.creative_direction.title_hint or "Untitled",
             thumbnail_url=candidate_frame_urls[0]
             if candidate_frame_urls
             else "https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=1200&q=80",
@@ -1008,7 +1008,8 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
                 if abs(frame_ts - timestamp_seconds) < 0.5:
                     gcs_url = frame.get("url", "")
                     frame_num = frame.get("frame_number", 1)
-                    timestamp_str = f"{frame_ts:.1f}s"
+                    # Use the timestamp from debug data, not from extracted_frames
+                    timestamp_str = f"{timestamp_seconds:.1f}s"
 
                     # Convert GCS URL to signed HTTP URL
                     if gcs_url.startswith("gs://"):
@@ -1084,7 +1085,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     return ThumbnailResponse(
         project_id=project_id,
         status="draft",
-        recommended_title=payload.creative_brief.title_hint or "AI-Analyzed Thumbnail Options",
+        title_hint=payload.creative_direction.title_hint or "Untitled",
         thumbnail_url=top_url
         or (
             candidate_frame_urls[0]
