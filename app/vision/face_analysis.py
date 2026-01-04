@@ -77,8 +77,6 @@ class FaceExpressionAnalyzer:
 
             if not model_path.exists():
                 # Download from ONNX Model Zoo
-                import urllib.request
-
                 print("Downloading FER+ ONNX model (~50MB)...")
                 url = "https://github.com/onnx/models/raw/main/validated/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
                 urllib.request.urlretrieve(url, str(model_path))
@@ -104,12 +102,13 @@ class FaceExpressionAnalyzer:
             "contempt",
         ]
 
-    def analyze_frame(self, frame_path: Path | str) -> dict[str, Any]:
+    def analyze_frame(self, frame_path: Path | str, skip_emotion: bool = False) -> dict[str, Any]:
         """
         Analyze facial expression in a single frame.
 
         Args:
             frame_path: Path to image file
+            skip_emotion: If True, skips FER+ emotion model (faster, for Stage 1 filtering)
 
         Returns:
             Dictionary with:
@@ -118,7 +117,7 @@ class FaceExpressionAnalyzer:
                 - eye_openness: float [0,1] - average eye openness
                 - mouth_openness: float [0,1] - mouth openness
                 - head_pose: dict - head orientation (pitch, yaw, roll)
-                - emotion_probs: dict - probability for each emotion
+                - emotion_probs: dict - probability for each emotion (empty if skip_emotion=True)
                 - landmarks: list - facial landmarks (for motion calculation)
         """
         # Check if file exists before attempting to read
@@ -150,24 +149,32 @@ class FaceExpressionAnalyzer:
         mouth_openness = self._calculate_mouth_openness(landmarks, h, w)
         head_pose = self._estimate_head_pose(landmarks, h, w)
 
-        # Crop face for emotion analysis
-        face_crop = self._crop_face_for_emotion(image, landmarks, h, w)
-
-        if face_crop is None:
-            return self._empty_result()
-
-        # Get emotion probabilities from FER+
-        emotion_probs = self._get_emotion_probs(face_crop)
-
-        # Calculate expression intensity (key metric!)
-        # This is 1 - P(neutral), measuring "how much is happening"
-        expression_intensity = 1.0 - emotion_probs.get("neutral", 0.5)
-
-        # Determine dominant emotion (highest probability)
-        if emotion_probs:
-            dominant_emotion = max(emotion_probs.items(), key=lambda x: x[1])[0]
-        else:
+        # PERFORMANCE OPTIMIZATION: Skip expensive emotion model if skip_emotion=True
+        if skip_emotion:
+            # Quick path: no emotion analysis (saves ~100ms per frame)
+            emotion_probs = {}
+            expression_intensity = 0.5  # Neutral default
             dominant_emotion = "neutral"
+        else:
+            # Full path: run FER+ emotion model
+            # Crop face for emotion analysis
+            face_crop = self._crop_face_for_emotion(image, landmarks, h, w)
+
+            if face_crop is None:
+                return self._empty_result()
+
+            # Get emotion probabilities from FER+
+            emotion_probs = self._get_emotion_probs(face_crop)
+
+            # Calculate expression intensity (key metric!)
+            # This is 1 - P(neutral), measuring "how much is happening"
+            expression_intensity = 1.0 - emotion_probs.get("neutral", 0.5)
+
+            # Determine dominant emotion (highest probability)
+            if emotion_probs:
+                dominant_emotion = max(emotion_probs.items(), key=lambda x: x[1])[0]
+            else:
+                dominant_emotion = "neutral"
 
         # Landmarks removed - not used anywhere in the codebase
         # If needed in future, can be re-enabled for facial motion tracking

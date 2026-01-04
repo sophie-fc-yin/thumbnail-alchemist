@@ -219,10 +219,13 @@ async def orchestrate_adaptive_sampling(
         niche=niche,
     )
 
-    stats["importance_calculation_time"] = time.time() - step_start
+    stage3_total_time = time.time() - step_start
+    stats["importance_calculation_time"] = stage3_total_time
 
     logger.info(
-        "Extracted and analyzed %d frames with full vision features", len(frames_with_features)
+        "Step 3 complete: Extracted and analyzed %d frames in %.2fs",
+        len(frames_with_features),
+        stage3_total_time,
     )
 
     # Upload important moments analysis to GCS (frames with all features)
@@ -293,7 +296,47 @@ async def orchestrate_adaptive_sampling(
     logger.info("Extracted and analyzed %d frames", len(frames_with_features))
 
     stats["total_time"] = time.time() - start_time
-    logger.info("Total processing time: %.2fs", stats["total_time"])
+
+    # ========================================================================
+    # PERFORMANCE BREAKDOWN REPORT
+    # ========================================================================
+    logger.info("=" * 70)
+    logger.info("⏱️  PERFORMANCE BREAKDOWN")
+    logger.info("=" * 70)
+    logger.info(
+        "1. Audio Extraction:        %6.2fs  (%5.1f%%)",
+        stats.get("audio_extraction_time", 0),
+        (stats.get("audio_extraction_time", 0) / stats["total_time"] * 100),
+    )
+    logger.info(
+        "2. Transcription:           %6.2fs  (%5.1f%%)",
+        stats.get("transcription_time", 0),
+        (stats.get("transcription_time", 0) / stats["total_time"] * 100),
+    )
+    logger.info(
+        "3. Audio Analysis (A+B):    %6.2fs  (%5.1f%%)",
+        stats.get("audio_analysis_time", 0),
+        (stats.get("audio_analysis_time", 0) / stats["total_time"] * 100),
+    )
+    logger.info(
+        "4. Initial Sparse Sampling: %6.2fs  (%5.1f%%)",
+        stats.get("initial_sampling_time", 0),
+        (stats.get("initial_sampling_time", 0) / stats["total_time"] * 100),
+    )
+    logger.info(
+        "5. Visual Change Analysis:  %6.2fs  (%5.1f%%)",
+        stats.get("visual_analysis_time", 0),
+        (stats.get("visual_analysis_time", 0) / stats["total_time"] * 100),
+    )
+    logger.info("6. Dense Frame Extraction + Vision Analysis:")
+    logger.info(
+        "   └─ Total:                %6.2fs  (%5.1f%%)",
+        stats.get("importance_calculation_time", 0),
+        (stats.get("importance_calculation_time", 0) / stats["total_time"] * 100),
+    )
+    logger.info("-" * 70)
+    logger.info("TOTAL PROCESSING TIME:     %6.2fs", stats["total_time"])
+    logger.info("=" * 70)
 
     # Check if frames were extracted
     if not frames_with_features:

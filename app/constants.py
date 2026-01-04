@@ -259,11 +259,13 @@ ADAPTIVE_SAMPLE_INTERVAL_MAX = 7.0  # Maximum interval (very long videos)
 # ADAPTIVE SAMPLING INTERVALS (New System)
 # ============================================================================
 # Base intervals (before adaptive scaling based on video duration)
-BASE_DENSE_INTERVAL_CRITICAL = 0.3  # Critical importance base: ~3.3 fps
-BASE_DENSE_INTERVAL_HIGH = 0.5  # High importance base: 2 fps
-BASE_DENSE_INTERVAL_MEDIUM = 1.0  # Medium importance base: 1 fps
-BASE_DENSE_INTERVAL_LOW = 2.0  # Low importance base: 0.5 fps
-BASE_DENSE_INTERVAL_MINIMAL = 3.0  # Minimal importance base: 0.33 fps
+# PERFORMANCE OPTIMIZATION: Increased intervals to extract ~25-30% fewer frames
+# This reduces vision analysis workload while maintaining quality for top moments
+BASE_DENSE_INTERVAL_CRITICAL = 0.4  # Critical importance base: ~2.5 fps (was 0.3)
+BASE_DENSE_INTERVAL_HIGH = 0.6  # High importance base: ~1.67 fps (was 0.5)
+BASE_DENSE_INTERVAL_MEDIUM = 1.2  # Medium importance base: ~0.83 fps (was 1.0)
+BASE_DENSE_INTERVAL_LOW = 2.0  # Low importance base: 0.5 fps (unchanged, rarely used)
+BASE_DENSE_INTERVAL_MINIMAL = 3.0  # Minimal importance base: 0.33 fps (unchanged, rarely used)
 
 # Adaptive interval scaling thresholds
 ADAPTIVE_INTERVAL_SHORT_THRESHOLD = 120.0  # < 2 min: no scaling (scale = 1.0)
@@ -313,6 +315,22 @@ VISUAL_CHANGE_SEPARATE_THRESHOLD = (
 # Parallel Processing Limits
 MAX_CONCURRENT_SEGMENT_EXTRACTIONS = 10  # Maximum concurrent ffmpeg processes
 MIN_SEGMENT_DURATION_FOR_EXTRACTION = 0.1  # Skip segments shorter than this (seconds)
+
+# ============================================================================
+# TWO-STAGE FILTERING (Performance Optimization)
+# ============================================================================
+# Stage 1: Quick filtering (face detection + basic quality) on all frames
+# Stage 2: Full analysis (emotion, aesthetics, composition) only on top candidates
+#
+# The keep_ratio controls the tradeoff between speed and quality:
+# - Higher ratio (0.70-0.80): Safer, less filtering, ~1.3-1.5x speedup
+# - Medium ratio (0.55-0.65): Balanced, moderate filtering, ~1.7-2x speedup
+# - Lower ratio (0.40-0.50): Aggressive, more filtering, ~2-2.5x speedup
+#
+# Recommendation: Start at 0.65 (conservative), then tune down if quality is maintained
+TWO_STAGE_KEEP_RATIO = 0.70  # Keep top 65% of frames for Stage 2 full analysis
+TWO_STAGE_MIN_FRAMES = 20  # Minimum frames to analyze (safety floor)
+TWO_STAGE_MAX_FRAMES = 60  # Maximum frames to analyze (performance ceiling)
 
 # Local Storage Paths
 # On Cloud Run, use /tmp (only writable directory)

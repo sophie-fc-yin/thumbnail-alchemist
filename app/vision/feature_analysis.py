@@ -21,6 +21,104 @@ from app.vision.face_analysis import get_face_expression_analyzer
 logger = logging.getLogger(__name__)
 
 
+def compute_vision_features_quick(
+    frame_path: str | Path,
+    face_analyzer: Any = None,
+) -> dict[str, Any]:
+    """
+    Compute quick vision features for Stage 1 filtering (fast pre-filter).
+
+    This is a lightweight version that skips expensive analysis:
+    - Face detection only (no FER+ emotion model)
+    - Basic image quality checks (brightness, contrast, sharpness)
+    - Skip: aesthetics, composition, editability, technical quality
+
+    Used in two-stage filtering to eliminate bad frames before full analysis.
+
+    Args:
+        frame_path: Path to the frame image file
+        face_analyzer: Optional FaceExpressionAnalyzer instance
+
+    Returns:
+        Dictionary containing quick filtering features:
+        {
+            "has_face": bool,
+            "face_count": int,
+            "quality_score": float [0, 1],  # Combined quality score
+            "brightness": float [0, 1],
+            "contrast": float [0, 1],
+            "sharpness": float [0, 1],
+            "is_too_dark": bool,
+            "is_too_bright": bool,
+            "is_blurry": bool,
+        }
+    """
+    frame_path = Path(frame_path)
+
+    # 1. Quick face detection (skip emotion model)
+    if face_analyzer is None:
+        face_analyzer = get_face_expression_analyzer()
+
+    face_result = {"has_face": False, "faces": []}
+    if frame_path.exists():
+        try:
+            # CRITICAL: Use skip_emotion=True to bypass FER+ model (~100ms savings)
+            face_result = face_analyzer.analyze_frame(str(frame_path), skip_emotion=True)
+        except Exception as e:
+            logger.warning("Quick face analysis failed for %s: %s", frame_path, e)
+
+    has_face = face_result.get("has_face", False)
+    face_count = 1 if has_face else 0
+
+    # 2. Quick image quality checks
+    image_quality = _analyze_image_quality(str(frame_path))
+
+    brightness = image_quality.get("brightness", 0.5)
+    contrast = image_quality.get("contrast", 0.5)
+    sharpness = image_quality.get("sharpness", 0.5)
+    is_too_dark = image_quality.get("is_too_dark", False)
+    is_too_bright = image_quality.get("is_too_bright", False)
+
+    # 3. Calculate simple quality score
+    quality_score = 1.0
+
+    # Penalize exposure problems
+    if is_too_dark or is_too_bright:
+        quality_score -= 0.4
+    elif brightness < 0.3 or brightness > 0.8:
+        quality_score -= 0.2
+
+    # Penalize low contrast
+    if contrast < 0.3:
+        quality_score -= 0.2
+    elif contrast < 0.4:
+        quality_score -= 0.1
+
+    # Penalize blur
+    if sharpness < 0.3:
+        quality_score -= 0.3
+        is_blurry = True
+    elif sharpness < 0.5:
+        quality_score -= 0.1
+        is_blurry = False
+    else:
+        is_blurry = False
+
+    quality_score = max(0.0, min(1.0, quality_score))
+
+    return {
+        "has_face": has_face,
+        "face_count": face_count,
+        "quality_score": quality_score,
+        "brightness": float(brightness),
+        "contrast": float(contrast),
+        "sharpness": float(sharpness),
+        "is_too_dark": is_too_dark,
+        "is_too_bright": is_too_bright,
+        "is_blurry": is_blurry,
+    }
+
+
 def compute_vision_features(
     frame_path: str | Path,
     niche: str = "general",
