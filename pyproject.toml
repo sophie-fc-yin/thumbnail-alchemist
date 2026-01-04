@@ -11,6 +11,7 @@ dependencies = [
     "google-cloud-storage>=3.7.0",
     "google-genai>=0.4.0",  # Official Gemini API (replaces deprecated google-generativeai)
     "openai>=1.0.0",
+    "assemblyai>=0.30.0",
     "librosa>=0.10.2,<0.11.0",
     "numpy",
     "opencv-python>=4.8.0",

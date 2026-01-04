@@ -8,9 +8,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import assemblyai as aai
 import librosa
 import numpy as np
-from openai import OpenAI
 
 from app.audio.speech_detection import detect_speech_in_audio
 from app.constants import (
@@ -46,7 +46,6 @@ from app.constants import (
     TEXT_IMPORTANCE_FILLER,
     TEXT_IMPORTANCE_MIN_CLAIM_WORDS,
     TEXT_IMPORTANCE_NEUTRAL,
-    TRANSCRIPTION_TIMEOUT,
 )
 from app.models import SourceMedia
 from app.utils.storage import upload_json_to_gcs
@@ -344,18 +343,18 @@ async def transcribe_speech_audio(
     save_timeline: bool = True,
 ) -> dict[str, Any]:
     """
-    Transcribe speech audio with speaker diarization.
+    Transcribe speech audio with speaker diarization using AssemblyAI.
 
     This function handles transcription and diarization of speech-only audio
 
     Note: Function is async because of retry logic with asyncio.sleep().
-    The OpenAI API call itself is synchronous but wrapped in async for retry handling.
+    The AssemblyAI API polling is handled asynchronously.
 
     Args:
         audio_path: Path to audio file (WAV format, 16kHz mono recommended)
         project_id: Project identifier for organizing output files
         language: Language code for transcription (e.g., "en", "es", "fr").
-                  If None, OpenAI will auto-detect the language (default: None)
+                  If None, AssemblyAI will auto-detect the language (default: None)
         save_timeline: If True, save transcript to JSON file (default: True)
 
     Returns:
@@ -370,30 +369,28 @@ async def transcribe_speech_audio(
         MediaValidationError: If transcription fails
     """
     try:
-        client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            timeout=TRANSCRIPTION_TIMEOUT,
+        # Configure AssemblyAI
+        aai.settings.api_key = os.getenv("ASSEMBLYAI_API_KEY")
+
+        # Configure transcription with diarization
+        config = aai.TranscriptionConfig(
+            speaker_labels=True,  # Enable speaker diarization
+            language_code=language if language else None,  # Auto-detect if None
         )
 
-        # STEP 1: GPT-4o Transcribe Diarize - Transcription + Speaker Diarization
+        # STEP 1: AssemblyAI Transcription + Speaker Diarization
         # Retry logic for network issues
         retry_delay = INITIAL_RETRY_DELAY
 
         for attempt in range(MAX_TRANSCRIPTION_RETRIES):
             try:
-                with open(audio_path, "rb") as audio_file:
-                    # Build transcription params - only include language if specified
-                    transcription_params = {
-                        "model": "gpt-4o-transcribe-diarize",
-                        "file": audio_file,
-                        "response_format": "diarized_json",
-                        "chunking_strategy": "auto",  # Required for audio > 30 seconds
-                    }
-                    # Only add language parameter if specified (None = auto-detect)
-                    if language is not None:
-                        transcription_params["language"] = language
+                transcriber = aai.Transcriber()
+                transcript = transcriber.transcribe(str(audio_path), config=config)
 
-                    transcription = client.audio.transcriptions.create(**transcription_params)
+                # Check for errors
+                if transcript.status == aai.TranscriptStatus.error:
+                    raise Exception(f"AssemblyAI transcription failed: {transcript.error}")
+
                 break  # Success, exit retry loop
             except Exception as e:
                 if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
@@ -408,33 +405,33 @@ async def transcribe_speech_audio(
                 else:
                     raise  # Re-raise on final attempt
 
-        # Extract speakers from transcription
-        # The diarized_json format includes speaker info directly in segments
-        # Note: OpenAI returns segment.start and segment.end in seconds (float)
+        # Extract speakers and segments from transcription
+        # AssemblyAI returns utterances with speaker labels
         speakers = set()
         segments = []
         duration = 0.0
 
-        if hasattr(transcription, "segments") and transcription.segments:
-            for segment in transcription.segments:
-                if hasattr(segment, "speaker") and segment.speaker:
-                    speakers.add(segment.speaker)
+        if transcript.utterances:
+            for utterance in transcript.utterances:
+                speaker_label = f"Speaker {utterance.speaker}"
+                speakers.add(speaker_label)
 
                 segments.append(
                     {
-                        "start": float(segment.start),  # seconds (float from OpenAI)
-                        "end": float(segment.end),  # seconds (float from OpenAI)
-                        "text": segment.text,
-                        "speaker": getattr(segment, "speaker", None),
+                        "start": float(utterance.start / 1000.0),  # Convert ms to seconds
+                        "end": float(utterance.end / 1000.0),  # Convert ms to seconds
+                        "text": utterance.text,
+                        "speaker": speaker_label,
                     }
                 )
 
                 # Track duration from last segment
-                if segment.end > duration:
-                    duration = segment.end
+                segment_end = utterance.end / 1000.0
+                if segment_end > duration:
+                    duration = segment_end
 
         result = {
-            "transcript": transcription.text,
+            "transcript": transcript.text,
             "speakers": [{"id": spk, "label": spk} for spk in sorted(speakers)],
             "segments": segments,
             "duration_seconds": duration,
