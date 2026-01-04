@@ -16,6 +16,24 @@ from mediapipe import ImageFormat, tasks
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import FaceLandmarkerOptions
 
+# Singleton instance for model reuse
+_face_expression_analyzer_instance: "FaceExpressionAnalyzer | None" = None
+
+
+def get_face_expression_analyzer() -> "FaceExpressionAnalyzer":
+    """Get or create singleton FaceExpressionAnalyzer instance.
+
+    Returns:
+        Shared FaceExpressionAnalyzer instance with loaded models.
+    """
+    global _face_expression_analyzer_instance
+    if _face_expression_analyzer_instance is None:
+        import logging
+
+        logging.getLogger(__name__).debug("Creating FaceExpressionAnalyzer singleton instance")
+        _face_expression_analyzer_instance = FaceExpressionAnalyzer()
+    return _face_expression_analyzer_instance
+
 
 class FaceExpressionAnalyzer:
     """Analyze facial expressions using MediaPipe + FER+ emotion model."""

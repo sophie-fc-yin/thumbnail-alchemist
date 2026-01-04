@@ -28,6 +28,24 @@ from app.constants import (
     VAD_SPEECH_PAD_MS,
 )
 
+# Singleton instance for model reuse
+_speech_detector_instance: SpeechDetector | None = None
+
+
+def get_speech_detector() -> SpeechDetector:
+    """Get or create singleton SpeechDetector instance.
+
+    Returns:
+        Shared SpeechDetector instance with loaded model.
+    """
+    global _speech_detector_instance
+    if _speech_detector_instance is None:
+        import logging
+
+        logging.getLogger(__name__).debug("Creating SpeechDetector singleton instance")
+        _speech_detector_instance = SpeechDetector()
+    return _speech_detector_instance
+
 
 class SpeechDetector:
     """
@@ -226,7 +244,7 @@ def detect_speech_in_audio(
             - speech_ratio: Ratio of speech to total audio duration
             - speech_path: Path to speech-only file (if output_speech_path provided)
     """
-    detector = SpeechDetector()
+    detector = get_speech_detector()
 
     # Detect speech segments
     segments = detector.detect_speech_segments(audio_path)

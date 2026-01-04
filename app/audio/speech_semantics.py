@@ -59,6 +59,22 @@ from app.constants import (
 
 logger = logging.getLogger(__name__)
 
+# Singleton instance for model reuse
+_speech_semantic_analyzer_instance: SpeechSemanticAnalyzer | None = None
+
+
+def get_speech_semantic_analyzer() -> SpeechSemanticAnalyzer:
+    """Get or create singleton SpeechSemanticAnalyzer instance.
+
+    Returns:
+        Shared SpeechSemanticAnalyzer instance with loaded models.
+    """
+    global _speech_semantic_analyzer_instance
+    if _speech_semantic_analyzer_instance is None:
+        logger.debug("Creating SpeechSemanticAnalyzer singleton instance")
+        _speech_semantic_analyzer_instance = SpeechSemanticAnalyzer()
+    return _speech_semantic_analyzer_instance
+
 
 class SpeechSemanticAnalyzer:
     """
@@ -690,7 +706,7 @@ async def analyze_speech(
             ...
         ]
     """
-    analyzer = SpeechSemanticAnalyzer()
+    analyzer = get_speech_semantic_analyzer()
 
     # 1. Detect tone on each segment
     logger.debug("Detecting tone on segments...")
