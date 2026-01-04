@@ -16,7 +16,7 @@ import cv2
 import numpy as np
 
 from app.thumbnail_agent.contextual_scoring import ContextualScoringCriteria
-from app.vision.face_analysis import FaceExpressionAnalyzer
+from app.vision.face_analysis import get_face_expression_analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +95,7 @@ def compute_vision_features(
 
     # Perform face analysis if analyzer is provided or create one
     if face_analyzer is None:
-        face_analyzer = FaceExpressionAnalyzer()
+        face_analyzer = get_face_expression_analyzer()
 
     # Analyze face
     face_analysis = {
@@ -165,7 +165,7 @@ def compute_vision_features_batch(
         List of vision feature dictionaries (one per frame, same format as compute_vision_features)
     """
     # Create analyzer once and reuse for all frames (more efficient)
-    face_analyzer = FaceExpressionAnalyzer()
+    face_analyzer = get_face_expression_analyzer()
 
     results = []
     for frame_path in frame_paths:

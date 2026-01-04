@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import time
+import warnings
 from pathlib import Path
 from uuid import uuid4
 
@@ -35,6 +36,10 @@ logging.basicConfig(
 app_log_level = getattr(logging, LOG_LEVEL, logging.DEBUG)
 for logger_name in ["app", "uvicorn.access"]:
     logging.getLogger(logger_name).setLevel(app_log_level)
+
+# Suppress NNPACK warnings from PyTorch (harmless, just noise)
+warnings.filterwarnings("ignore", message=".*NNPACK.*")
+logging.getLogger("torch").setLevel(logging.ERROR)
 
 from app.constants import DEFAULT_MAX_DURATION_SECONDS, GCS_ASSETS_BUCKET  # noqa: E402
 from app.models import (  # noqa: E402
