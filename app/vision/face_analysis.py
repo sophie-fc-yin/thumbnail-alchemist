@@ -4,12 +4,15 @@ This module provides facial expression intensity detection for adaptive frame sa
 Uses MediaPipe for face structure and FER+ for expression intensity.
 """
 
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 import onnxruntime as ort
+from mediapipe import Image as MPImage
+from mediapipe import ImageFormat, tasks
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import FaceLandmarkerOptions
 
@@ -25,8 +28,6 @@ class FaceExpressionAnalyzer:
             model_path: Path to FER+ ONNX model. If None, downloads from HuggingFace.
         """
         # MediaPipe FaceLandmarker (new API in MediaPipe 0.10+)
-        from mediapipe import tasks
-
         # Download face landmarker model
         model_dir = Path.home() / ".cache" / "mediapipe"
         model_dir.mkdir(parents=True, exist_ok=True)
@@ -34,8 +35,6 @@ class FaceExpressionAnalyzer:
 
         if not model_asset_path.exists():
             print("Downloading face landmarker model...")
-            import urllib.request
-
             url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
             urllib.request.urlretrieve(url, str(model_asset_path))
             print(f"Downloaded to {model_asset_path}")
@@ -52,9 +51,8 @@ class FaceExpressionAnalyzer:
 
         self.face_landmarker = vision.FaceLandmarker.create_from_options(options)
 
-        # Download FER+ model from HuggingFace if not provided
+        # Load FER+ model (download if not cached)
         if model_path is None:
-            print("Downloading FER+ ONNX model...")
             model_dir_fer = Path.home() / ".cache" / "ferplus"
             model_dir_fer.mkdir(parents=True, exist_ok=True)
             model_path = model_dir_fer / "emotion-ferplus-8.onnx"
@@ -63,9 +61,12 @@ class FaceExpressionAnalyzer:
                 # Download from ONNX Model Zoo
                 import urllib.request
 
+                print("Downloading FER+ ONNX model (~50MB)...")
                 url = "https://github.com/onnx/models/raw/main/validated/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx"
                 urllib.request.urlretrieve(url, str(model_path))
-                print(f"Downloaded FER+ model to {model_path}")
+                print(f"✓ Downloaded FER+ model to {model_path}")
+            else:
+                print(f"✓ Using cached FER+ model from {model_path}")
 
         # Load FER+ emotion model
         self.emotion_model = ort.InferenceSession(
@@ -102,6 +103,11 @@ class FaceExpressionAnalyzer:
                 - emotion_probs: dict - probability for each emotion
                 - landmarks: list - facial landmarks (for motion calculation)
         """
+        # Check if file exists before attempting to read
+        frame_path_obj = Path(frame_path)
+        if not frame_path_obj.exists():
+            return self._empty_result()
+
         # Read and convert image
         image = cv2.imread(str(frame_path))
         if image is None:
@@ -111,9 +117,6 @@ class FaceExpressionAnalyzer:
         h, w = image.shape[:2]
 
         # Create MediaPipe Image object
-        from mediapipe import Image as MPImage
-        from mediapipe import ImageFormat
-
         mp_image = MPImage(image_format=ImageFormat.SRGB, data=rgb)
 
         # MediaPipe face detection and landmarks (new API)
@@ -142,18 +145,23 @@ class FaceExpressionAnalyzer:
         # This is 1 - P(neutral), measuring "how much is happening"
         expression_intensity = 1.0 - emotion_probs.get("neutral", 0.5)
 
-        # Convert landmarks to list for motion tracking
-        # New API: landmarks is a list of NormalizedLandmark objects
-        landmark_coords = [(lm.x, lm.y, lm.z) for lm in landmarks]
+        # Determine dominant emotion (highest probability)
+        if emotion_probs:
+            dominant_emotion = max(emotion_probs.items(), key=lambda x: x[1])[0]
+        else:
+            dominant_emotion = "neutral"
+
+        # Landmarks removed - not used anywhere in the codebase
+        # If needed in future, can be re-enabled for facial motion tracking
 
         return {
             "has_face": True,
             "expression_intensity": float(expression_intensity),
+            "dominant_emotion": dominant_emotion,  # Add missing field!
             "eye_openness": float(eye_openness),
             "mouth_openness": float(mouth_openness),
             "head_pose": head_pose,
             "emotion_probs": emotion_probs,
-            "landmarks": landmark_coords,
         }
 
     def _empty_result(self) -> dict[str, Any]:
@@ -161,11 +169,11 @@ class FaceExpressionAnalyzer:
         return {
             "has_face": False,
             "expression_intensity": 0.0,
+            "dominant_emotion": "unknown",  # Add missing field!
             "eye_openness": 0.0,
             "mouth_openness": 0.0,
             "head_pose": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0},
             "emotion_probs": {},
-            "landmarks": [],
         }
 
     def _calculate_eye_openness(self, landmarks, img_h: int, img_w: int) -> float:

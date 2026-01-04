@@ -14,10 +14,9 @@ from app.models.media import SourceMedia
 
 # Thumbnail models
 from app.models.thumbnail import (
-    ChannelProfile,
     CompositionLayer,
-    CreativeBrief,
-    Target,
+    CreativeDirection,
+    CreatorContext,
     ThumbnailRequest,
     ThumbnailResponse,
 )
@@ -35,12 +34,23 @@ from app.models.upload import (
 # Vision models
 from app.models.vision import (
     AdaptiveSamplingResponse,
+    AestheticsScores,
+    CompositionScores,
+    EditabilityScores,
+    FaceQualityScores,
     FrameScore,
-    PaceSegment,
-    PaceStatistics,
+    FrameWithFeatures,
+    ImageQuality,
+    ImportanceSegment,
+    ImportanceStatistics,
+    ProcessImportantMomentsRequest,
+    ProcessImportantMomentsResponse,
     ProcessingStats,
+    TechnicalQuality,
     VisionBreakdownRequest,
     VisionBreakdownResponse,
+    VisionFeaturesRequest,
+    VisionFeaturesResponse,
 )
 
 __all__ = [
@@ -51,17 +61,27 @@ __all__ = [
     "AudioBreakdownResponse",
     # Vision
     "AdaptiveSamplingResponse",
+    "AestheticsScores",
+    "CompositionScores",
+    "EditabilityScores",
+    "FaceQualityScores",
     "FrameScore",
-    "PaceSegment",
-    "PaceStatistics",
+    "ImageQuality",
+    "ImportanceSegment",
+    "ImportanceStatistics",
     "ProcessingStats",
+    "TechnicalQuality",
     "VisionBreakdownRequest",
     "VisionBreakdownResponse",
+    "VisionFeaturesRequest",
+    "VisionFeaturesResponse",
+    "ProcessImportantMomentsRequest",
+    "ProcessImportantMomentsResponse",
+    "FrameWithFeatures",
     # Thumbnail
-    "ChannelProfile",
     "CompositionLayer",
-    "CreativeBrief",
-    "Target",
+    "CreativeDirection",
+    "CreatorContext",
     "ThumbnailRequest",
     "ThumbnailResponse",
     # Upload

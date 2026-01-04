@@ -1,24 +1,50 @@
+import logging
+import os
 import re
+import time
 from pathlib import Path
 from uuid import uuid4
 
+import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.analysis.adaptive_sampling import orchestrate_adaptive_sampling
-from app.audio.extraction import extract_audio_from_video, transcribe_and_analyze_audio
-from app.models import (
-    AdaptiveSamplingResponse,
+from app.analysis.adaptive_sampling import cleanup_local_frames, orchestrate_adaptive_sampling
+from app.analysis.processing import (
+    identify_important_moments,
+    process_audio_analysis,
+    process_initial_vision_analysis,
+)
+from app.models.thumbnail import ClickMomentPhase1, Phase1MomentInsight, Phase1Pillars
+from app.thumbnail_agent import ThumbnailSelector
+from app.vision.extraction import generate_signed_url
+
+# Configure logging
+LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
+
+# Set root logger to WARNING to avoid noise from third-party libraries
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# Enable DEBUG logging for our app modules only
+app_log_level = getattr(logging, LOG_LEVEL, logging.DEBUG)
+for logger_name in ["app", "uvicorn.access"]:
+    logging.getLogger(logger_name).setLevel(app_log_level)
+
+from app.constants import DEFAULT_MAX_DURATION_SECONDS, GCS_ASSETS_BUCKET  # noqa: E402
+from app.models import (  # noqa: E402
     AudioBreakdownRequest,
     AudioBreakdownResponse,
-    PaceSegment,
-    PaceStatistics,
-    ProcessingStats,
+    FrameWithFeatures,
+    ProcessImportantMomentsRequest,
+    ProcessImportantMomentsResponse,
     SignedUrlRequest,
     SignedUrlResponse,
-    SourceMedia,
     ThumbnailRequest,
     ThumbnailResponse,
     VideoUploadError,
@@ -26,13 +52,26 @@ from app.models import (
     VideoUrlRequest,
     VideoUrlResponse,
     VisionBreakdownRequest,
+    VisionBreakdownResponse,
 )
-from app.utils.storage import (
+from app.utils.storage import (  # noqa: E402
     StorageError,
     generate_signed_download_url,
     generate_signed_upload_url,
+    upload_audio_file_to_gcs,
     upload_file_to_gcs,
+    upload_json_to_gcs,
+    upload_project_file_to_gcs,
 )
+from app.vision.extraction import (  # noqa: E402
+    MediaValidationError,
+    VideoDurationExceededError,
+    get_video_duration,
+    validate_video_duration,
+)
+
+logger = logging.getLogger(__name__)
+logger.info("Logging configured - App: %s, Root: WARNING", LOG_LEVEL)
 
 app = FastAPI(title="Thumbnail Alchemist API", version="0.1.0")
 
@@ -118,140 +157,447 @@ async def breakdown_audio(payload: AudioBreakdownRequest) -> AudioBreakdownRespo
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
-    # Create SourceMedia object for audio processing
-    source_media = SourceMedia(video_path=payload.video_path)
+    # Generate signed URL once (reuse for validation and processing)
+    video_url = None
+    if payload.video_path.startswith(("gs://", "http://", "https://")):
+        video_url = generate_signed_url(payload.video_path)
 
-    # Extract audio from video (speech and full audio)
+    # Validate video duration before processing
     try:
-        audio_result = await extract_audio_from_video(
-            content_sources=source_media,
-            project_id=project_id,
+        await validate_video_duration(
+            payload.video_path,
             max_duration_seconds=payload.max_duration_seconds,
+            video_url=video_url,  # Reuse signed URL
+        )
+    except VideoDurationExceededError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video duration exceeds limit",
+                "detail": str(e),
+                "max_duration_seconds": payload.max_duration_seconds,
+            },
+        ) from e
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video validation failed",
+                "detail": str(e),
+            },
+        ) from e
+
+    # Process complete audio analysis pipeline
+    try:
+        audio_analysis_result = await process_audio_analysis(
+            video_path=payload.video_path,
+            project_id=project_id,
+            video_url=video_url,
         )
     except Exception as e:
-        raise ValueError(f"Failed to extract audio from video: {str(e)}") from e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Audio analysis failed",
+                "detail": str(e),
+            },
+        ) from e
 
-    if not audio_result:
-        raise ValueError("Failed to extract audio from video: ffmpeg returned no output")
+    # Extract results
+    audio_result = audio_analysis_result["audio_result"]
+    transcription_result = audio_analysis_result["transcription_result"]
+    stream_a_results = audio_analysis_result["stream_a_results"]
+    stream_b_results = audio_analysis_result["stream_b_results"]
+    audio_features = audio_analysis_result["audio_features"]
 
-    # Use speech lane for transcription
-    speech_path = audio_result["speech"]
+    # Upload audio files to GCS (extract_audio_from_video returns local paths)
+    gcs_speech_url = ""
+    speech_path = audio_result.get("speech")
+    if speech_path:
+        gcs_speech_url = (
+            upload_audio_file_to_gcs(
+                file_path=speech_path,
+                project_id=project_id,
+                directory="signals/audio",
+                filename="audio_speech.wav",
+                bucket_name="clickmoment-prod-assets",
+                cleanup_local=True,
+            )
+            or ""
+        )
 
-    # Analyze audio with transcription and features
-    analysis = await transcribe_and_analyze_audio(
-        audio_path=speech_path,  # Use speech-only lane for better transcription
-        project_id=project_id,
-        language=payload.language,
-    )
+    full_audio_path = audio_result.get("full_audio")
+    if full_audio_path:
+        upload_audio_file_to_gcs(
+            file_path=full_audio_path,
+            project_id=project_id,
+            directory="signals/audio",
+            filename="audio_full.wav",
+            bucket_name="clickmoment-prod-assets",
+            cleanup_local=True,
+        )
 
-    # Upload audio files and timeline JSON to GCS
-    from pathlib import Path
+    # Upload Stream A and Stream B results as JSON
+    if stream_a_results:
+        upload_json_to_gcs(
+            data=stream_a_results,
+            project_id=project_id,
+            directory="signals/audio",
+            filename="stream_a_results.json",
+            bucket_name="clickmoment-prod-assets",
+        )
+        logger.info("Uploaded Stream A results to GCS")
 
-    from google.cloud import storage
+    if stream_b_results:
+        upload_json_to_gcs(
+            data=stream_b_results,
+            project_id=project_id,
+            directory="signals/audio",
+            filename="stream_b_results.json",
+            bucket_name="clickmoment-prod-assets",
+        )
+        logger.info("Uploaded Stream B results to GCS")
 
-    gcs_speech_url = str(speech_path)  # Default to local path
-    gcs_full_audio_url = str(audio_result["full_audio"])
-
-    try:
-        client = storage.Client()
-        bucket = client.bucket("clickmoment-prod-assets")
-
-        # Upload speech audio file
-        speech_blob_path = f"projects/{project_id}/signals/audio/audio_speech.wav"
-        speech_blob = bucket.blob(speech_blob_path)
-        speech_blob.upload_from_filename(str(speech_path))
-        gcs_speech_url = f"gs://clickmoment-prod-assets/{speech_blob_path}"
-
-        # Upload full audio file (complete audio track)
-        full_audio_path = Path(audio_result["full_audio"])
-        full_audio_blob_path = f"projects/{project_id}/signals/audio/audio_full.wav"
-        full_audio_blob = bucket.blob(full_audio_blob_path)
-        full_audio_blob.upload_from_filename(str(full_audio_path))
-        gcs_full_audio_url = f"gs://clickmoment-prod-assets/{full_audio_blob_path}"
-
-        # Delete local audio files after upload
-        Path(speech_path).unlink()
-        full_audio_path.unlink()
-        print(f"Uploaded speech audio to {gcs_speech_url}")
-        print(f"Uploaded full audio to {gcs_full_audio_url}")
-
-        # Upload timeline JSON if it exists
-        if "timeline_path" in analysis:
-            print(f"Found timeline_path in analysis: {analysis['timeline_path']}")
-            timeline_path = Path(analysis["timeline_path"])
-            if timeline_path.exists():
-                print(f"Timeline file exists at {timeline_path}, uploading...")
-                json_blob_path = f"projects/{project_id}/signals/audio/{timeline_path.name}"
-                json_blob = bucket.blob(json_blob_path)
-                json_blob.upload_from_filename(str(timeline_path))
-
-                gcs_timeline_url = f"gs://clickmoment-prod-assets/{json_blob_path}"
-                print(f"Successfully uploaded timeline JSON to {gcs_timeline_url}")
-
-                # Delete local JSON file after upload
-                timeline_path.unlink()
-            else:
-                print(f"Timeline file does not exist at {timeline_path}")
-        else:
-            print(f"No timeline_path in analysis. Keys: {list(analysis.keys())}")
-
-    except Exception as e:
-        print(f"Failed to upload audio files to GCS: {e}")
+    # Handle case where no speech was detected
+    if not transcription_result:
+        return AudioBreakdownResponse(
+            project_id=project_id,
+            audio_path=gcs_speech_url,
+            transcript="",
+            duration_seconds=0.0,
+            stream_a_results=stream_a_results,
+            stream_b_results=stream_b_results,
+            audio_features=audio_features,
+        )
 
     return AudioBreakdownResponse(
         project_id=project_id,
-        audio_path=gcs_speech_url,  # Return speech-only audio path
-        transcript=analysis["transcript"],
-        duration_seconds=analysis["duration_seconds"],
-        speakers=analysis["speakers"],
-        speech_tone=analysis["speech_tone"],
-        music_tone=analysis["music_tone"],
-        timeline=analysis["timeline"],
+        audio_path=gcs_speech_url,
+        transcript=transcription_result.get("transcript", ""),
+        duration_seconds=transcription_result.get("duration_seconds", 0.0),
+        stream_a_results=stream_a_results,
+        stream_b_results=stream_b_results,
+        audio_features=audio_features,
     )
 
 
-@app.post("/vision/breakdown", response_model=AdaptiveSamplingResponse)
-async def breakdown_vision(payload: VisionBreakdownRequest) -> AdaptiveSamplingResponse:
+@app.post("/vision/breakdown", response_model=VisionBreakdownResponse)
+async def breakdown_vision(payload: VisionBreakdownRequest) -> VisionBreakdownResponse:
     """
-    Extract frames using adaptive pace-based sampling.
+    Perform initial vision analysis: sparse frame sampling and visual change detection.
 
-    This endpoint orchestrates the full pipeline:
-    1. Audio breakdown → extract audio timeline
-    2. Initial sparse sampling → sample frames for pace analysis
-    3. Face analysis → detect expressions and motion
-    4. Pace calculation → combine audio + visual signals
-    5. Adaptive extraction → dense sampling where pace is high
-    6. Storage → upload all frames to GCS
+    This endpoint:
+    1. Validates video duration
+    2. Calculates adaptive sampling interval based on video duration
+    3. Extracts sparse sample frames at adaptive intervals
+    4. Analyzes visual changes (shot/layout changes and motion spikes) on sample frames
 
-    Returns frames with pace segments and processing statistics.
+    Returns sample frames with visual change analysis results.
     """
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
-    print(f"[API] Starting adaptive sampling for project {project_id}")
+    # Generate signed URL once (reuse for validation and processing)
+    video_url = None
+    if payload.video_path.startswith(("gs://", "http://", "https://")):
+        video_url = generate_signed_url(payload.video_path)
 
-    # Run orchestrated pipeline
-    result = await orchestrate_adaptive_sampling(
-        video_path=payload.video_path,
+    # Validate video duration before processing
+    try:
+        await validate_video_duration(payload.video_path, video_url=video_url)
+    except VideoDurationExceededError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video duration exceeds limit",
+                "detail": str(e),
+                "max_duration_seconds": DEFAULT_MAX_DURATION_SECONDS,
+            },
+        ) from e
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video validation failed",
+                "detail": str(e),
+            },
+        ) from e
+
+    # Get video duration for adaptive sampling interval calculation
+    try:
+        video_duration = await get_video_duration(payload.video_path, video_url=video_url)
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Failed to get video duration",
+                "detail": str(e),
+            },
+        ) from e
+
+    # Process initial vision analysis
+    try:
+        vision_result = await process_initial_vision_analysis(
+            video_path=payload.video_path,
+            project_id=project_id,
+            video_duration=video_duration,
+            video_url=video_url,
+        )
+    except Exception as e:
+        logger.error("Initial vision analysis failed: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Initial vision analysis failed",
+                "detail": str(e),
+            },
+        ) from e
+
+    visual_frames = vision_result["visual_frames"]
+    motion_spikes_count = sum(1 for frame in visual_frames if frame.get("motion_spike", False))
+
+    response = VisionBreakdownResponse(
         project_id=project_id,
-        max_frames=payload.max_frames,
-        upload_to_gcs=True,
+        frames=visual_frames,
+        sample_interval=vision_result["sample_interval"],
+        stats=vision_result["stats"],
     )
 
-    # Convert to response model
-    response = AdaptiveSamplingResponse(
-        project_id=project_id,
-        frames=result["frames"],
-        total_frames=len(result["frames"]),
-        pace_segments=[PaceSegment(**seg) for seg in result["pace_segments"]],
-        pace_statistics=PaceStatistics(**result["pace_statistics"]),
-        processing_stats=ProcessingStats(**result["processing_stats"]),
-        summary=result["summary"],
+    logger.info(
+        "Initial vision analysis complete: %d sample frames, %d motion spikes detected",
+        len(visual_frames),
+        motion_spikes_count,
     )
-
-    print(f"[API] Adaptive sampling complete: {response.total_frames} frames extracted")
 
     return response
+
+
+@app.post("/vision/important-moments", response_model=ProcessImportantMomentsResponse)
+async def process_important_moments(
+    payload: ProcessImportantMomentsRequest,
+) -> ProcessImportantMomentsResponse:
+    """
+    Process important moments: identify, extract frames, and compute vision features.
+
+    This endpoint performs three steps:
+    1. Identify important moments by combining Stream A (speech semantics), Stream B (audio saliency), and visual signals
+    2. Extract dense frames in parallel for the identified important moments
+    3. Compute comprehensive vision features for each extracted frame (face analysis, aesthetics, editability, composition, technical quality)
+
+    **Prerequisites**: This endpoint requires pre-computed audio and vision analysis results:
+    - Stream A results: `/audio/breakdown` endpoint must be called first, or results must exist in GCS at `projects/{project_id}/signals/audio/stream_a_results.json`
+    - Stream B results: `/audio/breakdown` endpoint must be called first, or results must exist in GCS at `projects/{project_id}/signals/audio/stream_b_results.json`
+    - Visual frames: `/vision/breakdown` endpoint must be called first, or results must exist in GCS at `projects/{project_id}/signals/vision/initial_sample_visual_frames.json`
+
+    If results are not provided in the request and not found in GCS, the endpoint will return empty results.
+
+    Args:
+        payload: Request containing video_path, optional project_id, and optional pre-computed results
+
+    Returns:
+        ProcessImportantMomentsResponse with importance segments, extracted frames, and all vision features
+    """
+    start_time = time.time()
+    stats = {
+        "importance_calculation_time": 0.0,
+        "extraction_time": 0.0,
+        "vision_analysis_time": 0.0,
+        "total_time": 0.0,
+    }
+
+    # Use provided project_id or generate new one
+    # Treat placeholder values as None
+    if payload.project_id and payload.project_id.lower() not in ["string", "none", "null", ""]:
+        project_id = payload.project_id
+    else:
+        project_id = str(uuid4())
+        if payload.project_id:
+            logger.warning(
+                "project_id '%s' appears to be a placeholder, generated new UUID: %s",
+                payload.project_id,
+                project_id,
+            )
+
+    # Generate signed URL if needed
+    video_url = None
+    if payload.video_path.startswith(("gs://", "http://", "https://")):
+        video_url = generate_signed_url(payload.video_path)
+
+    # Get video duration
+    try:
+        video_duration = await get_video_duration(payload.video_path, video_url=video_url)
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Failed to get video duration",
+                "detail": str(e),
+            },
+        ) from e
+
+    # Call identify_important_moments which now handles everything:
+    # 1. Identifies important moments
+    # 2. Extracts dense frames
+    # 3. Computes vision features
+
+    # Log input data status and structure
+    logger.info(
+        "Processing important moments: video_duration=%.2fs, stream_a=%s, stream_b=%s, visual_frames=%s, project_id=%s",
+        video_duration,
+        "provided" if payload.stream_a_results else "will load from GCS",
+        "provided" if payload.stream_b_results else "will load from GCS",
+        "provided" if payload.visual_frames else "will load from GCS",
+        project_id,
+    )
+
+    # Debug: Log actual payload structure
+    if payload.stream_a_results:
+        logger.info(
+            "DEBUG payload.stream_a_results: type=%s, length=%d",
+            type(payload.stream_a_results).__name__,
+            len(payload.stream_a_results)
+            if isinstance(payload.stream_a_results, (list, dict))
+            else 0,
+        )
+        if isinstance(payload.stream_a_results, list) and len(payload.stream_a_results) > 0:
+            first = payload.stream_a_results[0]
+            logger.info(
+                "  First item type: %s, keys: %s",
+                type(first).__name__,
+                list(first.keys()) if isinstance(first, dict) else "not a dict",
+            )
+            if isinstance(first, dict):
+                logger.info(
+                    "  First item sample: start=%s, end=%s, importance=%s",
+                    first.get("start"),
+                    first.get("end"),
+                    first.get("importance"),
+                )
+
+    if payload.stream_b_results:
+        logger.info(
+            "DEBUG payload.stream_b_results: type=%s, length=%d",
+            type(payload.stream_b_results).__name__,
+            len(payload.stream_b_results)
+            if isinstance(payload.stream_b_results, (list, dict))
+            else 0,
+        )
+        if isinstance(payload.stream_b_results, list) and len(payload.stream_b_results) > 0:
+            first = payload.stream_b_results[0]
+            logger.info(
+                "  First item type: %s, keys: %s",
+                type(first).__name__,
+                list(first.keys()) if isinstance(first, dict) else "not a dict",
+            )
+
+    if payload.visual_frames:
+        logger.info(
+            "DEBUG payload.visual_frames: type=%s, length=%d",
+            type(payload.visual_frames).__name__,
+            len(payload.visual_frames) if isinstance(payload.visual_frames, (list, dict)) else 0,
+        )
+
+    try:
+        frames = await identify_important_moments(
+            video_duration=video_duration,
+            stream_a_results=payload.stream_a_results,
+            stream_b_results=payload.stream_b_results,
+            visual_frames=payload.visual_frames,
+            project_id=project_id,
+            video_path=payload.video_path,
+            video_url=video_url,
+            niche=payload.niche,
+        )
+    except Exception as e:
+        logger.error("Processing important moments failed: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Processing important moments failed",
+                "detail": str(e),
+            },
+        ) from e
+
+    stats["total_time"] = time.time() - start_time
+
+    logger.info(
+        "Processed %d frames extracted and analyzed (%.2fs)",
+        len(frames),
+        stats["total_time"],
+    )
+
+    # Check if we have any frames
+    if not frames:
+        logger.warning(
+            "No frames extracted. This usually means no signals were found. "
+            "Ensure that audio analysis (Stream A/B) and vision analysis results are available "
+            "either in the request or in GCS at projects/%s/signals/",
+            project_id,
+        )
+        # Return with diagnostic info
+        diagnostic = {
+            "message": "No frames extracted. This usually means no signals (Stream A, Stream B, or visual frames) were available.",
+            "signals_loaded": {
+                "stream_a_provided": payload.stream_a_results is not None,
+                "stream_b_provided": payload.stream_b_results is not None,
+                "visual_frames_provided": payload.visual_frames is not None,
+                "project_id": project_id,
+                "gcs_paths_checked": [
+                    f"projects/{project_id}/signals/audio/stream_a_results.json",
+                    f"projects/{project_id}/signals/audio/stream_b_results.json",
+                    f"projects/{project_id}/signals/vision/initial_sample_visual_frames.json",
+                ],
+            },
+            "recommendation": "Call /audio/breakdown and /vision/breakdown endpoints first to generate the required analysis results, or provide them in the request.",
+        }
+        return ProcessImportantMomentsResponse(
+            project_id=project_id,
+            importance_segments=[],
+            frames=[],
+            stats=stats,
+            diagnostic=diagnostic,
+        )
+
+    # Convert frame dictionaries to FrameWithFeatures objects
+    all_frames = []
+    for frame_dict in frames:
+        frame_with_features = FrameWithFeatures(
+            local_path=frame_dict.get("local_path", ""),
+            gcs_url=frame_dict.get("gcs_url", ""),
+            time=frame_dict.get("time", 0.0),
+            segment_index=frame_dict.get("segment_index", 0),
+            importance_level=frame_dict.get("importance_level", "low"),
+            importance_score=frame_dict.get("importance_score", 0.0),
+            segment_start=frame_dict.get("segment_start", 0.0),
+            segment_end=frame_dict.get("segment_end", 0.0),
+            face_analysis=frame_dict.get("face_analysis", {}),
+            visual_analysis={
+                "aesthetics": frame_dict.get("aesthetics", {}),
+                "editability": frame_dict.get("editability", {}),
+                "composition": frame_dict.get("composition", {}),
+                "technical_quality": frame_dict.get("technical_quality", {}),
+                "face_quality": frame_dict.get("face_quality", {}),
+            },
+        )
+        all_frames.append(frame_with_features)
+
+    # Upload important moments analysis to GCS (convert Pydantic objects to dicts)
+    frames_data = [frame.model_dump() for frame in all_frames]
+    upload_json_to_gcs(
+        data=frames_data,
+        project_id=project_id,
+        directory="analysis",
+        filename="important_moments_analysis.json",
+    )
+    logger.info("Uploaded important moments analysis to GCS: %d frames", len(all_frames))
+
+    return ProcessImportantMomentsResponse(
+        project_id=project_id,
+        importance_segments=[],  # Not returned by identify_important_moments anymore
+        frames=all_frames,
+        stats=stats,
+        diagnostic=None,  # No diagnostic needed if we have results
+    )
 
 
 @app.post("/thumbnails/generate", response_model=ThumbnailResponse)
@@ -260,7 +606,7 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     Generate thumbnail using adaptive sampling + AI selection agent.
 
     Pipeline:
-    1. Adaptive sampling → Extract candidate frames based on pace
+    1. Adaptive sampling → Extract candidate frames based on moment importance
     2. Thumbnail selection agent → AI picks best frame with detailed reasoning
     3. Return selected frame + composition suggestions
 
@@ -269,140 +615,250 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
-    print(f"\n{'='*70}")
-    print(f"THUMBNAIL GENERATION - Project {project_id}")
-    print(f"{'='*70}")
+    logger.info("=" * 70)
+    logger.info("THUMBNAIL GENERATION - Project %s", project_id)
+    logger.info("=" * 70)
 
     # Extract video path
     video_path = payload.content_sources.video_path
     if not video_path:
+        # Image-only mode: allow callers to provide pre-extracted frames/screenshots.
+        # This keeps the API usable without running the heavy video pipeline.
+        # No duration validation needed for image-only mode
+        image_paths = payload.content_sources.image_paths
+        if image_paths:
+            first = image_paths[0]
+            return ThumbnailResponse(
+                project_id=project_id,
+                status="draft",
+                title_hint=payload.creative_direction.title_hint or "Untitled",
+                thumbnail_url=first,
+                selected_frame_url=first,
+                profile_variant_url=None,
+                layers=[],
+                advisory=None,
+                phase1=None,
+                total_frames_extracted=len(image_paths),
+                analysis_json_url=None,
+                cost_usd=None,
+                gemini_model=None,
+                summary=(
+                    "Image-only request received. "
+                    "Provide a video_path to enable adaptive sampling + Phase-1 moment diagnostics."
+                ),
+            )
+
+    # Generate signed URL once (reuse for validation and processing)
+    video_url_for_processing = None
+    if video_path.startswith(("gs://", "http://", "https://")):
+        from app.vision.extraction import generate_signed_url
+
+        video_url_for_processing = generate_signed_url(video_path)
+
+    # Validate video duration before processing
+    try:
+        await validate_video_duration(video_path, video_url=video_url_for_processing)
+    except VideoDurationExceededError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="video_path is required in content_sources",
-        )
+            detail={
+                "error": "Video duration exceeds limit",
+                "detail": str(e),
+                "max_duration_seconds": DEFAULT_MAX_DURATION_SECONDS,
+            },
+        ) from e
+    except MediaValidationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "Video validation failed",
+                "detail": str(e),
+            },
+        ) from e
 
-    # ========================================================================
-    # STEP 1: Adaptive Sampling - Extract candidate frames
-    # ========================================================================
-    print(f"\n{'─'*70}")
-    print("STEP 1: Adaptive Sampling")
-    print(f"{'─'*70}")
-    print(f"Video: {video_path}")
+    logger.info("─" * 70)
+    logger.info("STEP 1: Adaptive Sampling")
+    logger.info("─" * 70)
+    logger.info("Video: %s", video_path)
 
+    # Extract frames locally for processing
+    # Note: Frames are stored locally during the processing pipeline.
+    # Final selected thumbnails can be uploaded separately if needed.
     adaptive_result = await orchestrate_adaptive_sampling(
         video_path=video_path,
         project_id=project_id,
-        max_frames=None,  # Auto-calculate based on video duration
-        upload_to_gcs=True,
+        video_url=video_url_for_processing,  # Reuse signed URL
     )
 
     candidate_frame_urls = adaptive_result["frames"]
-    print(f"✅ Extracted {len(candidate_frame_urls)} candidate frames")
+    logger.info("Extracted %d candidate frames", len(candidate_frame_urls))
 
-    # Load adaptive sampling analysis to get frame metadata
-    import json
+    # Get importance segments from adaptive sampling
+    segment_analysis = adaptive_result.get("segment_analysis", {})
+    selected_segments = segment_analysis.get("selected_segments", [])
 
-    from google.cloud import storage
-
-    # Download analysis JSON from GCS
-    analysis_json_url = adaptive_result.get("analysis_json_url")
-    if not analysis_json_url:
-        raise ValueError("No analysis JSON URL in adaptive sampling result")
-
-    # Parse GCS path
-    gcs_path = analysis_json_url.replace("gs://clickmoment-prod-assets/", "")
-    client = storage.Client()
-    bucket = client.bucket("clickmoment-prod-assets")
-    blob = bucket.blob(gcs_path)
-
-    # Download and parse JSON
-    analysis_data = json.loads(blob.download_as_text())
-    extracted_frames = analysis_data.get("extracted_frames", [])
+    # Use selected_frames from segment_analysis (best frames from important segments)
+    # These frames already have full vision features and are ranked by importance
+    extracted_frames = segment_analysis.get("selected_frames", [])
 
     if not extracted_frames:
-        raise ValueError("No frames found in adaptive sampling analysis")
+        raise ValueError("No frames found in segment analysis")
 
-    # Transform extracted_frames to ThumbnailSelector format
-    visual_analysis_frames = analysis_data.get("visual_analysis", {}).get("sample_frames", [])
-
-    # Enrich extracted_frames with required fields
-    enriched_frames = []
-    for idx, frame in enumerate(extracted_frames, 1):
-        timestamp = frame.get("timestamp", 0.0)
-
-        # Get matching visual analysis (find closest)
-        closest_visual = (
-            min(
-                visual_analysis_frames,
-                key=lambda v: abs(v.get("timestamp", 0) - timestamp),
-                default={},
+    # Log segment selection info
+    logger.info(
+        "Segment Analysis: %d segments, %d frames", len(selected_segments), len(extracted_frames)
+    )
+    if selected_segments:
+        logger.debug("Top segment time ranges:")
+        for seg in selected_segments[:5]:  # Show first 5
+            logger.debug(
+                "  %0.1fs-%0.1fs (importance: %0.2f, score: %0.2f)",
+                seg.get("start_time", 0),
+                seg.get("end_time", 0),
+                seg.get("avg_importance", 0),
+                seg.get("segment_score", 0),
             )
-            if visual_analysis_frames
-            else {}
-        )
+
+    # Transform selected frames from segment_analysis to ThumbnailSelector format
+    # These are the best frames (1-2 per segment) from the top importance segments (5-8 segments)
+    # Each frame already has complete vision features and importance scores
+    enriched_frames = []
+    frames_skipped = 0
+    frames_with_incomplete_analysis = 0
+
+    for idx, frame in enumerate(extracted_frames, 1):
+        timestamp = frame.get("time", 0.0)  # frames_with_features uses "time" not "timestamp"
+
+        # Get face analysis directly from this frame (analyzed during extraction)
+        face_analysis = frame.get("face_analysis", {})
+
+        # Get both local path (for Gemini) and GCS URL (for debugging)
+        local_path = frame.get("local_path", "")
+        gcs_url = frame.get("gcs_url", "")  # frames_with_features uses "gcs_url" not "frame_path"
+
+        # Skip frames without local path (needed for Gemini)
+        if not local_path:
+            logger.warning("Frame %d: missing local_path", idx)
+            frames_skipped += 1
+            continue
+
+        # AUDIT: Verify local_path filename matches timestamp
+        # Expected format: frame_XXXXms.jpg where XXXX is timestamp in milliseconds
+        try:
+            filename = Path(local_path).name
+            if "_" in filename and "ms" in filename:
+                timestamp_from_filename_ms = int(filename.split("_")[1].split("ms")[0])
+                timestamp_from_filename_sec = timestamp_from_filename_ms / 1000.0
+                timestamp_diff = abs(timestamp_from_filename_sec - timestamp)
+
+                if timestamp_diff > 1.0:  # More than 1 second difference
+                    logger.warning(
+                        "[AUDIT] Frame %d timestamp mismatch: metadata=%0.2fs, filename=%0.2fs, diff=%0.2fs, path=%s",
+                        idx,
+                        timestamp,
+                        timestamp_from_filename_sec,
+                        timestamp_diff,
+                        local_path,
+                    )
+        except Exception:
+            # Non-critical - just for debugging
+            pass
+
+        # Use ALL vision features already computed (aesthetics, editability, composition, etc.)
+        complete_visual_analysis = {
+            "face_analysis": face_analysis,
+            "aesthetics": frame.get("aesthetics", {}),
+            "editability": frame.get("editability", {}),
+            "composition": frame.get("composition", {}),
+            "technical_quality": frame.get("technical_quality", {}),
+            "face_quality": frame.get("face_quality", {}),
+        }
+
+        # Check if analysis is incomplete
+        if not face_analysis or not face_analysis.get("has_face"):
+            frames_with_incomplete_analysis += 1
+            if frames_with_incomplete_analysis <= 3:  # Log first 3
+                logger.debug("Frame %d: incomplete face_analysis", idx)
+
+        # CRITICAL: Use timestamp-based frame number to maintain identity through pipeline
+        # This ensures frame_number stays tied to the actual frame, not loop position
+        frame_number_from_timestamp = int(timestamp * 30)  # Assume ~30fps for unique IDs
 
         enriched_frames.append(
             {
-                "frame_number": idx,
-                "path": frame.get("frame_path", ""),
-                "url": frame.get("frame_path", ""),  # Same as path for GCS
+                "frame_number": frame_number_from_timestamp,  # Timestamp-based unique ID
+                "local_path": local_path,  # Local path for Gemini (faster)
+                "url": gcs_url,  # GCS URL for debugging/reference
                 "timestamp": timestamp,
-                "moment_score": frame.get("moment_score", 0.0),
-                "pace_score": frame.get("pace_score", 0.0),
-                "visual_analysis": closest_visual.get("face_analysis", {}),
+                "importance_score": frame.get("importance_score", 0.0),
+                "importance_level": frame.get("importance_level", "unknown"),
+                "visual_analysis": complete_visual_analysis,  # Complete analysis for scoring
             }
         )
+
+    logger.info(
+        "Frame enrichment: %d selected → %d enriched (skipped: %d, incomplete: %d)",
+        len(extracted_frames),
+        len(enriched_frames),
+        frames_skipped,
+        frames_with_incomplete_analysis,
+    )
 
     extracted_frames = enriched_frames
 
     # ========================================================================
     # STEP 2: Map request data to thumbnail selector format
     # ========================================================================
-    print(f"\n{'─'*70}")
-    print("STEP 2: Preparing Thumbnail Selection Agent")
-    print(f"{'─'*70}")
+    logger.info("─" * 70)
+    logger.info("STEP 2: Preparing Thumbnail Selection Agent")
+    logger.info("─" * 70)
 
-    # Map creative brief
+    # Map creative direction to selector format
     selector_brief = {
-        "video_title": payload.creative_brief.title_hint or "Untitled Video",
-        "primary_message": payload.creative_brief.notes or "No description provided",
-        "target_emotion": "curiosity",  # Default
-        "primary_goal": _map_optimization_to_goal(payload.target.optimization),
-        "tone": _infer_tone_from_mood(payload.creative_brief.mood),
+        "video_title": payload.creative_direction.title_hint or "Untitled Video",
+        "primary_message": payload.creative_direction.notes or "No description provided",
+        "target_emotion": "curiosity",  # System determines from content
+        "primary_goal": "maximize_ctr",  # System determines autonomously from content analysis
+        "tone": _infer_tone_from_mood(payload.creative_direction.mood),
     }
 
-    # Map channel profile
+    # Map creator context to selector format
     selector_profile = {
-        "niche": payload.channel_profile.content_niche or "general",
-        "personality": _infer_personality(payload.creative_brief.mood),
-        "visual_style": _infer_visual_style(payload.creative_brief.mood),
+        "niche": payload.creator_context.niche_hint
+        or "general",  # Weak signal, system infers from content
+        "personality": _infer_personality(payload.creative_direction.mood),
+        "visual_style": _infer_visual_style(payload.creative_direction.mood),
     }
 
-    print(f"Creative Brief: {selector_brief['video_title']}")
-    print(f"Goal: {selector_brief['primary_goal']}")
-    print(f"Niche: {selector_profile['niche']}")
+    logger.info(
+        "Creative Brief: '%s' (goal: %s, niche: %s)",
+        selector_brief["video_title"],
+        selector_brief["primary_goal"],
+        selector_profile["niche"],
+    )
 
     # ========================================================================
     # STEP 3: Run Thumbnail Selection Agent
     # ========================================================================
-    print(f"\n{'─'*70}")
-    print("STEP 3: AI Thumbnail Selection")
-    print(f"{'─'*70}")
-
-    from app.thumbnail_agent import ThumbnailSelector
+    logger.info("─" * 70)
+    logger.info("STEP 3: AI Thumbnail Selection")
+    logger.info("─" * 70)
 
     # Initialize selector (uses GEMINI_API_KEY)
     try:
         selector = ThumbnailSelector(use_pro=False)  # Use Flash by default
     except ValueError as e:
         # GEMINI_API_KEY not set - return mock response
-        print(f"⚠️  {e}")
-        print("Returning mock response without AI selection")
+        logger.warning("GEMINI_API_KEY not set: %s", e)
+        logger.warning("Returning mock response without AI selection")
+
+        # Cleanup local frames before returning
+        cleanup_local_frames(project_id)
 
         return ThumbnailResponse(
             project_id=project_id,
             status="draft",
-            recommended_title=payload.creative_brief.title_hint or "AI-Generated Thumbnail",
+            title_hint=payload.creative_direction.title_hint or "Untitled",
             thumbnail_url=candidate_frame_urls[0]
             if candidate_frame_urls
             else "https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=1200&q=80",
@@ -410,118 +866,237 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
             profile_variant_url=None,
             layers=[],
             advisory=None,
+            phase1=None,
             total_frames_extracted=len(candidate_frame_urls),
             analysis_json_url=adaptive_result.get("analysis_json_url"),
             cost_usd=None,
             gemini_model=None,
-            summary=f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. Set GEMINI_API_KEY to enable AI-powered thumbnail advisory with strategic options (safe/bold/avoid).",
+            summary=(
+                f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. "
+                "Set GEMINI_API_KEY to enable ClickMoment Phase-1 moment diagnostics."
+            ),
         )
 
-    # Run selection agent
+    # Run selection agent with pre-selected frames from importance segments
     selection_result = await selector.select_best_thumbnail(
         frames=extracted_frames,
         creative_brief=selector_brief,
         channel_profile=selector_profile,
     )
 
-    # Extract advisory data from Gemini response
-    safe_option = selection_result.get("safe", {})
-    high_variance_option = selection_result.get("high_variance", {})
-    avoid_option = selection_result.get("avoid", {})
+    # ========================================================================
+    # Save selection results to GCS
+    # ========================================================================
+    frames_sent_to_gemini = selection_result.get("frames_sent_to_gemini", [])
+
+    # 1. Save the 10 frames sent to Gemini analysis
+    if frames_sent_to_gemini:
+        logger.info("Saving %d selected frames to GCS...", len(frames_sent_to_gemini))
+        for frame in frames_sent_to_gemini:
+            local_path = frame.get("local_path")
+            timestamp = frame.get("timestamp", 0.0)
+            if local_path and Path(local_path).exists():
+                # Format: frame_00004700ms.jpg (timestamp in milliseconds)
+                timestamp_ms = int(timestamp * 1000)
+                filename = f"frame_{timestamp_ms:08d}ms.jpg"
+
+                # Upload frame to selected_frames directory
+                upload_project_file_to_gcs(
+                    file_path=local_path,
+                    project_id=project_id,
+                    directory="selected_frames",
+                    filename=filename,
+                    bucket_name=GCS_ASSETS_BUCKET,
+                    cleanup_local=False,  # Don't delete, we still need them
+                )
+        logger.info("Saved %d selected frames", len(frames_sent_to_gemini))
+
+    # Extract Phase-1 diagnostic data from Gemini response
+    moments = selection_result.get("moments", [])
     meta = selection_result.get("meta", {})
     debug_data = selection_result.get("debug", {})
 
-    print("✅ AI Advisory Generated")
-    print(f"📊 Confidence: {meta.get('confidence', 'unknown')}")
-    print(f"💡 Safe option: {safe_option.get('frame_id', 'N/A')}")
-    print(f"🎯 Bold option: {high_variance_option.get('frame_id', 'N/A')}")
-    print(f"⚠️  Avoid: {avoid_option.get('frame_id', 'N/A')}")
+    logger.info("ClickMoment Phase-1 Insights Generated")
+    logger.info("Confidence: %s", meta.get("confidence", "unknown"))
+    if moments:
+        logger.info("Top moment: %s", moments[0].get("frame_id", "N/A"))
+
+    # 2. Save Gemini's reasoning to agent_reasoning.json
+    upload_json_to_gcs(
+        data=selection_result,
+        project_id=project_id,
+        directory="analysis",
+        filename="agent_reasoning.json",
+        bucket_name=GCS_ASSETS_BUCKET,
+    )
+    logger.info("Saved agent reasoning to GCS")
+
+    # 3. Save top frames picked by Gemini to top_frames/
+    if moments:
+        logger.info("Saving %d top frames picked by Gemini...", min(len(moments), 3))
+        for idx, moment in enumerate(moments[:3], 1):  # Save top 3 moments
+            frame_id = moment.get("frame_id", "")
+            # Find the corresponding frame from frames_sent_to_gemini
+            # frame_id format: "Frame 1", "Frame 2", etc.
+            try:
+                frame_idx = int(frame_id.split()[-1]) - 1  # Convert "Frame 1" to index 0
+                if 0 <= frame_idx < len(frames_sent_to_gemini):
+                    frame = frames_sent_to_gemini[frame_idx]
+                    local_path = frame.get("local_path")
+                    timestamp = frame.get("timestamp", 0.0)
+
+                    if local_path and Path(local_path).exists():
+                        timestamp_ms = int(timestamp * 1000)
+                        filename = f"top{idx}_frame_{timestamp_ms:08d}ms.jpg"
+
+                        # Upload frame to top_frames directory
+                        upload_project_file_to_gcs(
+                            file_path=local_path,
+                            project_id=project_id,
+                            directory="top_frames",
+                            filename=filename,
+                            bucket_name=GCS_ASSETS_BUCKET,
+                            cleanup_local=False,
+                        )
+            except (ValueError, IndexError) as e:
+                logger.warning("Could not save top frame %d: %s", idx, e)
+
+        logger.info("Saved top frames picked by Gemini")
 
     # ========================================================================
     # STEP 4: Build Response
     # ========================================================================
-    print(f"\n{'─'*70}")
-    print("STEP 4: Building Response")
-    print(f"{'─'*70}")
+    logger.info("─" * 70)
+    logger.info("STEP 4: Building Response")
+    logger.info("─" * 70)
 
-    # Helper function to extract frame number and URL from frame_id
-    def get_frame_info(frame_id: str) -> tuple[int, str]:
-        """Extract frame number from 'Frame X' format."""
-        try:
-            num = int(frame_id.replace("Frame", "").strip())
-            # Find matching frame in extracted_frames
-            if 0 < num <= len(extracted_frames):
-                frame = extracted_frames[num - 1]
-                return num, frame.get("url", "")
-        except (ValueError, IndexError):
-            pass
-        return 1, extracted_frames[0].get("url", "") if extracted_frames else ""
+    # Helper function to extract frame number, URL, and timestamp from frame_id
+    def get_frame_info(frame_id: str) -> tuple[int, str, str]:
+        """Extract frame number from 'Frame X' format and convert GCS URL to signed HTTP URL.
 
-    # Build advisory with full data
-    from app.models.thumbnail import AdvisoryMeta, FrameOption, ThumbnailAdvisory
+        CRITICAL: Use debug data to find the correct frame, not array indexing!
+        The frame_id refers to the position in frames sent to Gemini, not the original extracted_frames array.
 
-    safe_num, safe_url = get_frame_info(safe_option.get("frame_id", "Frame 1"))
-    advisory = ThumbnailAdvisory(
-        safe=FrameOption(
-            frame_id=safe_option.get("frame_id", "Frame 1"),
-            frame_number=safe_num,
-            timestamp=safe_option.get("timestamp", "0.0s"),
-            frame_url=safe_url,
-            one_liner=safe_option.get("one_liner", ""),
-            reasons=safe_option.get("reasons", []),
-            risk_notes=safe_option.get("risk_notes", []),
-        ),
-        high_variance=FrameOption(
-            frame_id=high_variance_option.get("frame_id", "Frame 1"),
-            frame_number=get_frame_info(high_variance_option.get("frame_id", "Frame 1"))[0],
-            timestamp=high_variance_option.get("timestamp", "0.0s"),
-            frame_url=get_frame_info(high_variance_option.get("frame_id", "Frame 1"))[1],
-            one_liner=high_variance_option.get("one_liner", ""),
-            reasons=high_variance_option.get("reasons", []),
-            risk_notes=high_variance_option.get("risk_notes", []),
-        ),
-        avoid=FrameOption(
-            frame_id=avoid_option.get("frame_id", "Frame 1"),
-            frame_number=get_frame_info(avoid_option.get("frame_id", "Frame 1"))[0],
-            timestamp=avoid_option.get("timestamp", "0.0s"),
-            frame_url=get_frame_info(avoid_option.get("frame_id", "Frame 1"))[1],
-            one_liner=avoid_option.get("one_liner", ""),
-            reasons=avoid_option.get("reasons", []),
-            risk_notes=avoid_option.get("risk_notes", []),
-        ),
-        meta=AdvisoryMeta(
-            confidence=meta.get("confidence", "medium"),
-            what_changed=meta.get("what_changed", ""),
-            user_control_note=meta.get("user_control_note", ""),
-        ),
-        debug=debug_data,
+        Returns:
+            Tuple of (frame_number, frame_url, timestamp_string)
+        """
+        from app.vision.extraction import generate_signed_url
+
+        # CRITICAL: Use debug.all_frames_scored to find the correct timestamp for this frame_id
+        # The frame_id number refers to the position in the TOP 10 frames sent to Gemini
+        all_frames_scored = debug_data.get("all_frames_scored", [])
+
+        # Find the frame in debug data by frame_id
+        matching_debug_frame = None
+        for debug_frame in all_frames_scored:
+            if debug_frame.get("frame_id") == frame_id:
+                matching_debug_frame = debug_frame
+                break
+
+        if matching_debug_frame:
+            # Get the actual timestamp from debug data
+            debug_timestamp = matching_debug_frame.get("timestamp", "0.0s")
+            # Parse timestamp string (format: "XX.Xs")
+            try:
+                timestamp_seconds = float(debug_timestamp.replace("s", ""))
+            except (ValueError, AttributeError):
+                timestamp_seconds = 0.0
+
+            # Find the frame in extracted_frames by matching timestamp (within 0.5s tolerance)
+            for frame in extracted_frames:
+                frame_ts = frame.get("timestamp", 0.0)
+                if abs(frame_ts - timestamp_seconds) < 0.5:
+                    gcs_url = frame.get("url", "")
+                    frame_num = frame.get("frame_number", 1)
+                    # Use the timestamp from debug data, not from extracted_frames
+                    timestamp_str = f"{timestamp_seconds:.1f}s"
+
+                    # Convert GCS URL to signed HTTP URL
+                    if gcs_url.startswith("gs://"):
+                        return frame_num, generate_signed_url(gcs_url), timestamp_str
+                    return frame_num, gcs_url, timestamp_str
+
+        # Fallback to first frame if no match found
+        logger.warning("[FRAME LOOKUP] Could not find frame for %s, using fallback", frame_id)
+        if extracted_frames:
+            gcs_url = extracted_frames[0].get("url", "")
+            frame_timestamp = extracted_frames[0].get("timestamp", 0.0)
+            timestamp_str = f"{frame_timestamp:.1f}s"
+            if gcs_url.startswith("gs://"):
+                return 1, generate_signed_url(gcs_url), timestamp_str
+            return 1, gcs_url, timestamp_str
+        return 1, "", "0.0s"
+
+    # Build Phase-1 response model (diagnostic, non-prescriptive)
+    phase1_moments: list[Phase1MomentInsight] = []
+    for m in moments[:3]:
+        frame_id = m.get("frame_id", "Frame 1")
+        frame_num, frame_url, frame_timestamp = get_frame_info(frame_id)
+        pillars = m.get("pillars", {}) or {}
+
+        phase1_moments.append(
+            Phase1MomentInsight(
+                frame_id=frame_id,
+                frame_number=frame_num,
+                timestamp=frame_timestamp,  # Use actual timestamp from frame data, not Gemini's response
+                frame_url=frame_url,
+                moment_summary=m.get("moment_summary", ""),
+                viewer_feel=m.get("viewer_feel", ""),
+                why_this_reads=m.get("why_this_reads", []) or [],
+                optional_note=m.get("optional_note"),
+                pillars=Phase1Pillars(
+                    emotional_signal=pillars.get("emotional_signal", ""),
+                    curiosity_gap=pillars.get("curiosity_gap", ""),
+                    attention_signals=pillars.get("attention_signals", []) or [],
+                    readability_speed=pillars.get("readability_speed", ""),
+                ),
+            )
+        )
+
+    phase1 = ClickMomentPhase1(
+        moments=phase1_moments,
+        meta=meta if isinstance(meta, dict) else {},
+        debug=debug_data if isinstance(debug_data, dict) else {},
     )
 
-    # Build summary text
-    summary_parts = [
-        "✅ AI Thumbnail Advisory Generated",
-        f"\n\n📊 Confidence: {meta.get('confidence', 'medium').upper()}",
-        f"\n🎯 Total Frames Analyzed: {len(extracted_frames)}",
-        f"\n\n🛡️  SAFE OPTION (Frame {safe_num}):",
-        f"\n{safe_option.get('one_liner', '')}",
-        "\n\n🚀 BOLD OPTION:",
-        f"\n{high_variance_option.get('one_liner', '')}",
-        "\n\n⚠️  AVOID:",
-        f"\n{avoid_option.get('one_liner', '')}",
-        f"\n\n💡 {meta.get('user_control_note', 'You decide which option fits your vision best.')}",
+    # Choose a default thumbnail_url from the top moment (fallback to first extracted frame)
+    top_url = (
+        phase1_moments[0].frame_url
+        if phase1_moments
+        else (candidate_frame_urls[0] if candidate_frame_urls else None)
+    )
+
+    # Build summary text (Phase 1: observational)
+    summary_lines = [
+        "✅ ClickMoment Phase-1 moments surfaced",
+        f"🧭 Selection note: {meta.get('selection_note', 'n/a')}",
+        f"🎯 Total Frames Analyzed: {len(extracted_frames)}",
     ]
-    summary_text = "".join(summary_parts)
+    for mm in phase1_moments:
+        summary_lines.append(f"- {mm.frame_id}: {mm.moment_summary}")
+    summary_text = "\n".join(summary_lines)
+
+    # ========================================================================
+    # CLEANUP: Delete local frames after thumbnail selection
+    # ========================================================================
+    cleanup_local_frames(project_id)
 
     # Use safe option as default thumbnail_url
     return ThumbnailResponse(
         project_id=project_id,
         status="draft",
-        recommended_title=payload.creative_brief.title_hint or "AI-Analyzed Thumbnail Options",
-        thumbnail_url=safe_url,
-        selected_frame_url=safe_url,
+        title_hint=payload.creative_direction.title_hint or "Untitled",
+        thumbnail_url=top_url
+        or (
+            candidate_frame_urls[0]
+            if candidate_frame_urls
+            else "https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?auto=format&fit=crop&w=1200&q=80"
+        ),
+        selected_frame_url=top_url,
         profile_variant_url=None,
         layers=[],
-        advisory=advisory,
+        advisory=None,
+        phase1=phase1,
         total_frames_extracted=len(extracted_frames),
         analysis_json_url=adaptive_result.get("analysis_json_url"),
         cost_usd=selection_result.get("cost_usd"),
@@ -761,15 +1336,21 @@ async def upload_video(
     file: UploadFile = File(..., description="Video file to upload"),
     user_id: str = Form(..., description="User ID from your application"),
 ) -> VideoUploadResponse:
-    """
+    max_duration_min = DEFAULT_MAX_DURATION_SECONDS // 60
+    max_duration_sec = DEFAULT_MAX_DURATION_SECONDS
+    f"""
     Upload a video file to cloud storage.
 
     **File Requirements:**
     - Max size: 5 GB
+    - Max duration: {max_duration_min} minutes ({max_duration_sec} seconds)
     - Allowed formats: mp4, mov, avi, mkv, webm, flv
 
+    **Note:** Videos longer than {max_duration_min} minutes will be truncated during processing.
+    Only the first {max_duration_min} minutes will be analyzed for transcription and thumbnail selection.
+
     **Storage Path:**
-    - Files saved to: `users/{user_id}/videos/{filename}`
+    - Files saved to: `users/{{user_id}}/videos/{{filename}}`
     - Files with same name are overwritten (with warning in response)
 
     **Example:**
@@ -886,6 +1467,5 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("app.main:app", host="0.0.0.0", port=9000, reload=True)
+    port = int(os.environ.get("PORT", 9000))
+    uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

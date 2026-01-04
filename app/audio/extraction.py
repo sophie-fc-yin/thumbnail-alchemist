@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -12,120 +13,46 @@ import numpy as np
 from openai import OpenAI
 
 from app.audio.speech_detection import detect_speech_in_audio
+from app.constants import (
+    AUDIO_FRAME_LENGTH_SECONDS,
+    AUDIO_HOP_LENGTH_SECONDS,
+    BGM_MAX_PENALTY,
+    BGM_MAX_VARIANCE,
+    BGM_MIN_PENALTY,
+    DEFAULT_CLAIM_KEYWORDS,
+    DEFAULT_EMPHASIS_KEYWORDS,
+    DEFAULT_FILLER_KEYWORDS,
+    DEFAULT_MAX_DURATION_SECONDS,
+    DEFAULT_SAMPLE_RATE,
+    EMPHASIS_MIN_STD,
+    EMPHASIS_WINDOW_SECONDS,
+    ENERGY_PEAK_MIN_SPACING,
+    ENERGY_PEAK_PERCENTILE,
+    ENERGY_PEAK_WINDOW_SIZE,
+    INITIAL_RETRY_DELAY,
+    LOCAL_MEDIA_DIR,
+    LOUDNORM_I,
+    LOUDNORM_LRA,
+    LOUDNORM_TP,
+    MAX_TRANSCRIPTION_RETRIES,
+    MUSIC_ENERGY_THRESHOLD,
+    MUSIC_MIN_DURATION,
+    MUSIC_SCORE_THRESHOLD,
+    PITCH_VARIANCE_WINDOW_SIZE,
+    PROJECT_ASSETS_BUCKET,
+    SPEECH_CONFIDENCE_THRESHOLD,
+    TEXT_IMPORTANCE_CLAIM,
+    TEXT_IMPORTANCE_EMPHASIS,
+    TEXT_IMPORTANCE_FILLER,
+    TEXT_IMPORTANCE_MIN_CLAIM_WORDS,
+    TEXT_IMPORTANCE_NEUTRAL,
+    TRANSCRIPTION_TIMEOUT,
+)
 from app.models import SourceMedia
+from app.utils.storage import upload_json_to_gcs
 from app.vision.extraction import MediaValidationError, generate_signed_url
 
-# ============================================================================
-# CONSTANTS
-# ============================================================================
-
-# Audio Extraction
-DEFAULT_MAX_DURATION_SECONDS = 1800  # 30 minutes
-DEFAULT_SAMPLE_RATE = 16000  # 16kHz for speech recognition
-LOUDNORM_I = -16  # Integrated loudness target (LUFS)
-LOUDNORM_TP = -1.5  # True peak (dBTP)
-LOUDNORM_LRA = 11  # Loudness range (LU)
-
-# Transcription
-MAX_TRANSCRIPTION_RETRIES = 3
-INITIAL_RETRY_DELAY = 2.0  # seconds
-TRANSCRIPTION_TIMEOUT = 300.0  # 5 minutes
-
-# Audio Features
-AUDIO_FRAME_LENGTH_SECONDS = 0.1  # 100ms frames
-AUDIO_HOP_LENGTH_SECONDS = 0.05  # 50ms hop (50% overlap)
-PITCH_VARIANCE_WINDOW_SIZE = 20  # ~1 second windows
-
-# Speech Detection
-SPEECH_CONFIDENCE_THRESHOLD = 0.5
-SPEECH_ENERGY_THRESHOLD = 0.03
-SPEECH_PITCH_VARIANCE_THRESHOLD = 5000.0  # typical speech: 100-10000
-
-# Text Importance
-TEXT_IMPORTANCE_CLAIM = 1.0
-TEXT_IMPORTANCE_EMPHASIS = 0.7
-TEXT_IMPORTANCE_NEUTRAL = 0.4
-TEXT_IMPORTANCE_FILLER = 0.1
-TEXT_IMPORTANCE_MIN_CLAIM_WORDS = 10
-
-# Emphasis Score
-EMPHASIS_WINDOW_SECONDS = 5.0  # Window for rolling baseline
-EMPHASIS_MIN_STD = 1e-6  # Avoid division by zero
-
-# BGM Penalty
-BGM_MAX_VARIANCE = 0.05  # Threshold for max penalty
-BGM_MIN_PENALTY = 0.2  # Minimum penalty multiplier
-BGM_MAX_PENALTY = 1.0  # Maximum penalty multiplier
-
-# Timeline Events
-SILENCE_THRESHOLD = 0.02  # Energy threshold for silence
-MIN_PAUSE_DURATION = 1.0  # Only track pauses > 1 second
-ENERGY_PEAK_PERCENTILE = 90  # Top 10% energy
-ENERGY_PEAK_WINDOW_SIZE = 20  # ~1 second window
-ENERGY_PEAK_MIN_SPACING = 2.0  # Minimum spacing between peaks (seconds)
-
-# Music Detection
-MUSIC_ENERGY_THRESHOLD = 0.1
-MUSIC_SCORE_THRESHOLD = 0.5
-MUSIC_MIN_DURATION = 3.0  # Minimum 3 seconds
-
-# Default Keyword Lists
-DEFAULT_CLAIM_KEYWORDS = [
-    "discovered",
-    "revealed",
-    "found",
-    "proved",
-    "demonstrated",
-    "breakthrough",
-    "amazing",
-    "incredible",
-    "shocking",
-    "secret",
-    "truth",
-    "fact",
-    "evidence",
-    "research shows",
-    "study found",
-    "this is",
-    "here's why",
-    "the reason",
-    "turns out",
-]
-
-DEFAULT_EMPHASIS_KEYWORDS = [
-    "but",
-    "however",
-    "although",
-    "instead",
-    "actually",
-    "important",
-    "key",
-    "crucial",
-    "critical",
-    "essential",
-    "remember",
-    "note",
-    "pay attention",
-    "listen",
-    "focus",
-    "versus",
-    "compared to",
-    "unlike",
-    "difference",
-]
-
-DEFAULT_FILLER_KEYWORDS = [
-    "um",
-    "uh",
-    "like",
-    "you know",
-    "i mean",
-    "sort of",
-    "kind of",
-    "basically",
-    "literally",
-    "just",
-]
+logger = logging.getLogger(__name__)
 
 
 async def extract_audio_from_video(
@@ -134,6 +61,7 @@ async def extract_audio_from_video(
     max_duration_seconds: int = DEFAULT_MAX_DURATION_SECONDS,
     output_dir: Path | None = None,
     ffmpeg_binary: str | None = None,
+    video_url: str | None = None,
 ) -> dict[str, Path] | None:
     """
     Extract audio from video with speech/full-audio separation.
@@ -153,14 +81,15 @@ async def extract_audio_from_video(
         max_duration_seconds: Maximum duration to extract in seconds (default: 1800 = 30 minutes)
         output_dir: Custom output directory for extracted audio (overrides default structure)
         ffmpeg_binary: Path to ffmpeg binary (auto-detected if None)
+        video_url: Optional pre-generated signed URL (avoids duplicate signing if already done)
 
     Returns:
         Dictionary with audio paths, or None if extraction failed:
         {
-            "speech": Path("audio_speech.wav"),      # Speech-only
-            "full_audio": Path("audio_full.wav"),    # Complete audio
-            "speech_ratio": 0.42,                    # % of video that's speech
-            "segments": [...]                         # Speech segment timestamps
+            "speech": Path("audio_speech.wav") | None,  # Speech-only (None if no speech detected)
+            "full_audio": Path("audio_full.wav"),      # Complete audio
+            "speech_ratio": 0.42,                        # % of video that's speech
+            "segments": [...]                            # Speech segment timestamps
         }
     """
     video_source = content_sources.video_path
@@ -168,33 +97,55 @@ async def extract_audio_from_video(
     if not video_source or not ffmpeg_path:
         return None
 
-    # Check if video is local file (validate existence) or URL (generate signed URL if GCS)
-    if not video_source.startswith(("http://", "https://", "gs://")):
+    # Use pre-generated signed URL if provided, otherwise generate one
+    if video_url:
+        # Reuse pre-generated signed URL (avoids duplicate GCS API calls)
+        video_source = video_url
+    elif not video_source.startswith(("http://", "https://", "gs://")):
         # Local file path - validate existence
         video_path_obj = Path(video_source)
         if not video_path_obj.exists():
             return None
+        # video_source is already correct (local path)
     else:
-        # GCS URL - generate signed URL for private access
+        # GCS URL - generate signed URL for private access (fallback if not pre-generated)
         video_source = generate_signed_url(video_source)
 
     if output_dir:
-        target_dir = output_dir
+        target_dir = Path(output_dir).resolve()
     else:
-        # Default to structured storage: clickmoment-prod-assets/projects/{project_id}/signals/audio
-        target_dir = Path("clickmoment-prod-assets") / "projects" / project_id / "signals" / "audio"
+        # Default to local structured storage: thumbnail-alchemist-media/projects/{project_id}/signals/audio
+        target_dir = Path(LOCAL_MEDIA_DIR).resolve() / "projects" / project_id / "signals" / "audio"
 
     target_dir.mkdir(parents=True, exist_ok=True)
     full_audio_path = target_dir / "audio_full.wav"
     speech_path = target_dir / "audio_speech.wav"
 
+    # Ensure paths are absolute for ffmpeg
+    full_audio_path = full_audio_path.resolve()
+    speech_path = speech_path.resolve()
+
+    # Verify directory exists and is writable
+    if not target_dir.exists():
+        logger.error("Target directory does not exist: %s", target_dir)
+        return None
+    if not os.access(target_dir, os.W_OK):
+        logger.error("Target directory is not writable: %s", target_dir)
+        return None
+
+    logger.info("Extracting full audio to: %s", full_audio_path)
+
     # STEP 1: Extract full audio using ffmpeg streaming
-    # -t limits duration to max_duration_seconds
+    # Note: Duration validation should be done BEFORE calling this function
+    # The -t flag is kept as a safety fallback, but videos exceeding max_duration
+    # should be rejected earlier in the pipeline
     # -vn removes video stream (audio only)
     # -af loudnorm normalizes audio volume for consistent analysis
     # -acodec pcm_s16le for WAV format (16-bit PCM)
     # -ac 1 converts to mono (reduces file size, sufficient for analysis)
     # -ar sets sample rate (standard for VAD)
+
+    # Build ffmpeg command (keep -t as safety fallback, but validation should happen earlier)
     process = await asyncio.create_subprocess_exec(
         ffmpeg_path,
         "-hide_banner",
@@ -203,7 +154,7 @@ async def extract_audio_from_video(
         "-i",
         video_source,  # Signed URL for GCS, or direct path/URL
         "-t",
-        str(max_duration_seconds),
+        str(max_duration_seconds),  # Safety fallback - should not be needed if validation works
         "-vn",  # No video
         "-af",
         f"loudnorm=I={LOUDNORM_I}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}",  # EBU R128 loudness normalization
@@ -222,50 +173,62 @@ async def extract_audio_from_video(
 
     if process.returncode != 0:
         error_msg = stderr.decode() if stderr else "Unknown error"
-        print(f"ffmpeg failed with return code {process.returncode}: {error_msg}")
+        logger.error("ffmpeg failed with return code %d: %s", process.returncode, error_msg)
         return None
 
-    if not full_audio_path.exists():
-        print(f"ffmpeg succeeded but output file not found at {full_audio_path}")
-        return None
+    # Check if file exists (with small retry for filesystem flush)
+    max_retries = 3
+    for attempt in range(max_retries):
+        if full_audio_path.exists():
+            break
+        if attempt < max_retries - 1:
+            await asyncio.sleep(0.1)  # Small delay for filesystem flush
+        else:
+            # Final check - log detailed error
+            logger.error(
+                "ffmpeg succeeded (returncode=0) but output file not found at %s (absolute: %s)",
+                full_audio_path,
+                full_audio_path.resolve(),
+            )
+            if stderr:
+                logger.error("ffmpeg stderr: %s", stderr.decode())
+            # Check if file exists in current directory (common ffmpeg issue)
+            cwd_file = Path.cwd() / full_audio_path.name
+            if cwd_file.exists():
+                logger.error("Found file in current directory instead: %s", cwd_file)
+            return None
 
     # STEP 2: Detect speech segments and create speech-only lane
-    try:
-        speech_result = detect_speech_in_audio(
-            audio_path=full_audio_path,
-            output_speech_path=speech_path,
-            filter_singing=True,  # Filter out singing vocals
+    speech_result = detect_speech_in_audio(
+        audio_path=full_audio_path,
+        output_speech_path=speech_path,
+        filter_singing=True,  # Filter out singing vocals
+    )
+
+    # Determine speech file path: use speech_path if speech was detected, None otherwise
+    # The function returns the same path we passed in, so we can check segments instead
+    speech_file_path = speech_path if speech_result.get("segments") else None
+
+    # Log if no speech was detected (valid result, not an error)
+    if not speech_file_path:
+        logger.info(
+            "No speech detected: speech_ratio=%.1f%%, segments=%d. "
+            "No speech file created - downstream code should handle this case.",
+            speech_result["speech_ratio"] * 100,
+            len(speech_result["segments"]),
         )
 
-        print(
-            f"[Audio Extraction] Speech detection complete: "
-            f"{len(speech_result['segments'])} segments, "
-            f"{speech_result['speech_ratio']:.1%} speech ratio"
-        )
-
-        return {
-            "speech": speech_path,
-            "full_audio": full_audio_path,
-            "speech_ratio": speech_result["speech_ratio"],
-            "segments": speech_result["segments"],
-            "total_duration": speech_result["total_duration"],
-            "speech_duration": speech_result["speech_duration"],
-        }
-
-    except Exception as e:
-        print(f"Speech detection failed: {e}")
-        # Fallback: return full audio only, use it for both
-        return {
-            "speech": full_audio_path,  # Use full audio as fallback
-            "full_audio": full_audio_path,
-            "speech_ratio": 1.0,
-            "segments": [],
-            "total_duration": 0.0,
-            "speech_duration": 0.0,
-        }
+    return {
+        "speech": speech_file_path,  # None if no speech detected
+        "full_audio": full_audio_path,
+        "speech_ratio": speech_result["speech_ratio"],
+        "segments": speech_result["segments"],
+        "total_duration": speech_result["total_duration"],
+        "speech_duration": speech_result["speech_duration"],
+    }
 
 
-async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
+async def analyze_audio_features(audio_path: Path) -> list[dict[str, Any]]:
     """
     Extract audio features for prosody and music analysis.
 
@@ -273,7 +236,20 @@ async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
         audio_path: Path to audio file
 
     Returns:
-        Dictionary with frame-by-frame audio features
+        List of audio segments with start/end and features (same format as speech segments):
+        [
+            {
+                "start": float,
+                "end": float,
+                "pitch": float,
+                "pitch_variance": float,
+                "energy": float,
+                "zero_crossing_rate": float,
+                "spectral_brightness": float,
+                "spectral_rolloff": float,
+            },
+            ...
+        ]
     """
     # Load audio
     y, sr = librosa.load(str(audio_path), sr=DEFAULT_SAMPLE_RATE, mono=True)
@@ -303,12 +279,10 @@ async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
     spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
     spectral_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=hop_length)[0]
 
-    # Tempo and beat tracking
-    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
-    beat_times = librosa.frames_to_time(beats, sr=sr, hop_length=hop_length)
-
-    # Create timeline from frames
-    times = librosa.frames_to_time(range(len(rms)), sr=sr, hop_length=hop_length)
+    # Create timeline from analysis windows - format as list of segments (same as speech segments)
+    segment_starts = librosa.frames_to_time(range(len(rms)), sr=sr, hop_length=hop_length)
+    segment_duration = frame_length / sr  # Duration of each analysis window in seconds
+    segment_ends = segment_starts + segment_duration
 
     # Calculate pitch variance (in windows)
     pitch_variance = []
@@ -319,18 +293,23 @@ async def analyze_audio_features(audio_path: Path) -> dict[str, Any]:
         variance = float(np.var(window_pitches)) if window_pitches else 0.0
         pitch_variance.append(variance)
 
-    return {
-        "times": times.tolist(),
-        "pitch": pitch_values,
-        "pitch_variance": pitch_variance,
-        "energy": rms.tolist(),
-        "zero_crossing_rate": zcr.tolist(),
-        "spectral_brightness": spectral_centroids.tolist(),
-        "spectral_rolloff": spectral_rolloff.tolist(),
-        "tempo": float(tempo),
-        "beat_times": beat_times.tolist(),
-        "sample_rate": sr,
-    }
+    # Format as list of segments (same format as speech segments)
+    segments = []
+    for i in range(len(rms)):
+        segments.append(
+            {
+                "start": float(segment_starts[i]),
+                "end": float(segment_ends[i]),
+                "pitch": pitch_values[i],
+                "pitch_variance": pitch_variance[i],
+                "energy": float(rms[i]),
+                "zero_crossing_rate": float(zcr[i]),
+                "spectral_brightness": float(spectral_centroids[i]),
+                "spectral_rolloff": float(spectral_rolloff[i]),
+            }
+        )
+
+    return segments
 
 
 def save_timeline_json(timeline_data: dict[str, Any], output_path: Path) -> None:
@@ -338,7 +317,7 @@ def save_timeline_json(timeline_data: dict[str, Any], output_path: Path) -> None
     Save timeline data to JSON file.
 
     Args:
-        timeline_data: Timeline dictionary from transcribe_and_analyze_audio
+        timeline_data: Timeline dictionary from transcribe_speech_audio
         output_path: Path to save JSON file
     """
 
@@ -358,47 +337,37 @@ def save_timeline_json(timeline_data: dict[str, Any], output_path: Path) -> None
         json.dump(serializable_data, f, indent=2)
 
 
-async def transcribe_and_analyze_audio(
+async def transcribe_speech_audio(
     audio_path: Path,
     project_id: str,
-    language: str = "en",
+    language: str | None = None,
     save_timeline: bool = True,
 ) -> dict[str, Any]:
     """
-    Comprehensive audio understanding using GPT-4o Transcribe Diarize + Librosa.
+    Transcribe speech audio with speaker diarization.
 
-    Pipeline:
-    1. GPT-4o Transcribe Diarize - Automatic transcription with speaker diarization
-    2. Librosa - Low-level audio features (pitch, energy, tempo, spectral analysis)
-    3. Timeline assembly - Merge all data into unified KEY MOMENTS timeline
+    This function handles transcription and diarization of speech-only audio
 
-    The timeline focuses on key moments for thumbnail selection:
-    - Segments (sentences) with avg energy/pitch and speaker labels
-    - Speaker turns (transitions between speakers)
-    - Energy peaks (high-energy moments, top 10%)
-    - Significant pauses (>1 second)
-    - Music sections (>3 seconds, detected from spectral features)
+    Note: Function is async because of retry logic with asyncio.sleep().
+    The OpenAI API call itself is synchronous but wrapped in async for retry handling.
 
     Args:
         audio_path: Path to audio file (WAV format, 16kHz mono recommended)
         project_id: Project identifier for organizing output files
-        language: Language code for transcription (default: "en")
-        save_timeline: If True, save timeline to JSON file (default: True)
+        language: Language code for transcription (e.g., "en", "es", "fr").
+                  If None, OpenAI will auto-detect the language (default: None)
+        save_timeline: If True, save transcript to JSON file (default: True)
 
     Returns:
-        Dictionary containing comprehensive audio timeline with:
-            - timeline: Time-aligned key events (20-50 events, not word-level)
-                       All timestamps in milliseconds (start_ms, end_ms, time_ms)
+        Dictionary containing:
             - transcript: Full text transcript
             - speakers: List of detected speakers with IDs
-            - duration_seconds: Total audio duration
-            - speech_tone: Overall speech characteristics (pitch, energy, tempo)
-            - music_tone: Music characteristics (tempo, loudness, brightness)
-            - audio_features: Raw librosa features (times, pitch, energy, etc.)
-            - timeline_path: Path to saved audio_timeline.json (if save_timeline=True)
+            - segments: List of transcript segments with start, end, text, and speaker
+            - duration_seconds: Total audio duration (from last segment end time)
+            - timeline_path: Path to saved transcript JSON (if save_timeline=True)
 
     Raises:
-        MediaValidationError: If transcription/analysis fails
+        MediaValidationError: If transcription fails
     """
     try:
         client = OpenAI(
@@ -413,179 +382,76 @@ async def transcribe_and_analyze_audio(
         for attempt in range(MAX_TRANSCRIPTION_RETRIES):
             try:
                 with open(audio_path, "rb") as audio_file:
-                    transcription = client.audio.transcriptions.create(
-                        model="gpt-4o-transcribe-diarize",
-                        file=audio_file,
-                        response_format="diarized_json",
-                        chunking_strategy="auto",  # Required for audio > 30 seconds
-                        language=language,
-                    )
+                    # Build transcription params - only include language if specified
+                    transcription_params = {
+                        "model": "gpt-4o-transcribe-diarize",
+                        "file": audio_file,
+                        "response_format": "diarized_json",
+                        "chunking_strategy": "auto",  # Required for audio > 30 seconds
+                    }
+                    # Only add language parameter if specified (None = auto-detect)
+                    if language is not None:
+                        transcription_params["language"] = language
+
+                    transcription = client.audio.transcriptions.create(**transcription_params)
                 break  # Success, exit retry loop
             except Exception as e:
                 if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
-                    print(
-                        f"Transcription attempt {attempt + 1} failed: {e}. Retrying in {retry_delay}s..."
+                    logger.warning(
+                        "Transcription attempt %d failed: %s. Retrying in %.1fs...",
+                        attempt + 1,
+                        e,
+                        retry_delay,
                     )
                     await asyncio.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                 else:
                     raise  # Re-raise on final attempt
 
-        # STEP 2: Extract audio features (prosody, tone, music)
-        audio_features = await analyze_audio_features(audio_path)
-
-        # STEP 3: Extract speakers from transcription
+        # Extract speakers from transcription
         # The diarized_json format includes speaker info directly in segments
+        # Note: OpenAI returns segment.start and segment.end in seconds (float)
         speakers = set()
+        segments = []
+        duration = 0.0
+
         if hasattr(transcription, "segments") and transcription.segments:
             for segment in transcription.segments:
                 if hasattr(segment, "speaker") and segment.speaker:
                     speakers.add(segment.speaker)
 
-        # STEP 4: Build unified timeline (KEY MOMENTS ONLY)
-        timeline = []
-
-        # Add segment-level events (sentences) with enriched context
-        if hasattr(transcription, "segments") and transcription.segments:
-            for segment in transcription.segments:
-                # Get average energy and pitch for this segment
-                segment_features = _get_segment_features(segment.start, segment.end, audio_features)
-
-                segment_event = {
-                    "type": "segment",
-                    "start_ms": int(segment.start * 1000),
-                    "end_ms": int(segment.end * 1000),
-                    "text": segment.text,
-                    "avg_energy": segment_features["avg_energy"],
-                    "avg_pitch": segment_features["avg_pitch"],
-                }
-
-                # Add speaker info from diarization (if available)
-                if hasattr(segment, "speaker") and segment.speaker:
-                    segment_event["speaker"] = segment.speaker
-
-                # Calculate audio score for this segment
-                audio_scores = calculate_audio_score(
-                    segment=segment_event,
-                    audio_features=audio_features,
+                segments.append(
+                    {
+                        "start": float(segment.start),  # seconds (float from OpenAI)
+                        "end": float(segment.end),  # seconds (float from OpenAI)
+                        "text": segment.text,
+                        "speaker": getattr(segment, "speaker", None),
+                    }
                 )
 
-                # Add audio score components to segment
-                segment_event.update(audio_scores)
-
-                timeline.append(segment_event)
-
-        # Add speaker turn events (transitions between speakers)
-        if hasattr(transcription, "segments") and transcription.segments:
-            prev_speaker = None
-            for segment in transcription.segments:
-                current_speaker = segment.speaker if hasattr(segment, "speaker") else None
-                if current_speaker and current_speaker != prev_speaker and prev_speaker is not None:
-                    timeline.append(
-                        {
-                            "type": "speaker_turn",
-                            "time_ms": int(segment.start * 1000),
-                            "from_speaker": prev_speaker,
-                            "to_speaker": current_speaker,
-                        }
-                    )
-                prev_speaker = current_speaker
-
-        # Add SIGNIFICANT pauses only (> MIN_PAUSE_DURATION)
-        in_silence = False
-        silence_start = 0.0
-
-        for time, energy in zip(audio_features["times"], audio_features["energy"]):
-            if energy < SILENCE_THRESHOLD and not in_silence:
-                silence_start = time
-                in_silence = True
-            elif energy >= SILENCE_THRESHOLD and in_silence:
-                if time - silence_start > MIN_PAUSE_DURATION:  # Only significant pauses
-                    timeline.append(
-                        {
-                            "type": "pause",
-                            "start_ms": int(silence_start * 1000),
-                            "end_ms": int(time * 1000),
-                            "duration_ms": int((time - silence_start) * 1000),
-                        }
-                    )
-                in_silence = False
-
-        # Add energy peaks (excitement/emphasis moments)
-        energy_peaks = _detect_energy_peaks(audio_features)
-        for peak in energy_peaks:
-            timeline.append(
-                {
-                    "type": "energy_peak",
-                    "time_ms": int(peak["time"] * 1000),
-                    "energy": peak["energy"],
-                    "context": "high_energy_moment",
-                }
-            )
-
-        # Add music sections (detected from spectral analysis)
-        music_sections = _detect_music_sections(audio_features)
-        for section in music_sections:
-            timeline.append(
-                {
-                    "type": "music_section",
-                    "start_ms": int(section["start"] * 1000),
-                    "end_ms": int(section["end"] * 1000),
-                    "intensity": section["intensity"],
-                }
-            )
-
-        # Sort timeline by start time
-        timeline.sort(key=lambda x: x.get("start_ms", x.get("time_ms", 0)))
-
-        # Calculate overall tone characteristics
-        speech_tone = {
-            "avg_pitch": float(
-                sum(p for p in audio_features["pitch"] if p > 0)
-                / max(1, sum(1 for p in audio_features["pitch"] if p > 0))
-            ),
-            "avg_energy": float(sum(audio_features["energy"]) / len(audio_features["energy"])),
-            "pitch_variance": float(
-                sum(audio_features["pitch_variance"]) / len(audio_features["pitch_variance"])
-            ),
-            "tempo": audio_features["tempo"],
-        }
-
-        music_tone = {
-            "tempo": audio_features["tempo"],
-            "avg_loudness": float(sum(audio_features["energy"]) / len(audio_features["energy"])),
-            "avg_brightness": float(
-                sum(audio_features["spectral_brightness"])
-                / len(audio_features["spectral_brightness"])
-            ),
-            "harmonic_ratio": 1.0
-            - float(
-                sum(audio_features["zero_crossing_rate"])
-                / len(audio_features["zero_crossing_rate"])
-            ),
-        }
-
-        duration = audio_features["times"][-1] if audio_features["times"] else 0.0
+                # Track duration from last segment
+                if segment.end > duration:
+                    duration = segment.end
 
         result = {
-            "timeline": timeline,
             "transcript": transcription.text,
             "speakers": [{"id": spk, "label": spk} for spk in sorted(speakers)],
+            "segments": segments,
             "duration_seconds": duration,
-            "speech_tone": speech_tone,
-            "music_tone": music_tone,
-            "audio_features": audio_features,
         }
 
-        # Save timeline to JSON if requested
+        # Save speech audio transcript to JSON if requested
         if save_timeline:
-            timeline_dir = (
-                Path("clickmoment-prod-assets") / "projects" / project_id / "signals" / "audio"
+            # Upload directly to GCS from memory
+            gcs_url = upload_json_to_gcs(
+                data=result,
+                project_id=project_id,
+                directory="signals/audio",
+                filename="speech_audio_transcript.json",
+                bucket_name=PROJECT_ASSETS_BUCKET,
             )
-            timeline_dir.mkdir(parents=True, exist_ok=True)
-            timeline_path = timeline_dir / "audio_timeline.json"
-            save_timeline_json(result, timeline_path)
-            result["timeline_path"] = str(timeline_path)
+            if gcs_url:
+                result["timeline_path"] = gcs_url
 
         return result
 
@@ -627,21 +493,24 @@ def _get_segment_features(start: float, end: float, audio_features: dict) -> dic
     Args:
         start: Segment start time
         end: Segment end time
-        audio_features: Audio features dict from analyze_audio_features
+        audio_features: List of audio segments from analyze_audio_features
 
     Returns:
         Dictionary with average features for the segment
     """
-    # Find all feature frames within this segment
-    times = audio_features["times"]
-    indices = [i for i, t in enumerate(times) if start <= t <= end]
+    # Find all segments that overlap with this segment
+    matching_segments = [
+        seg
+        for seg in audio_features
+        if not (seg["end"] <= start or seg["start"] >= end)  # Overlap check
+    ]
 
-    if not indices:
+    if not matching_segments:
         return {"avg_energy": 0.0, "avg_pitch": 0.0}
 
     # Calculate averages
-    energies = [audio_features["energy"][i] for i in indices]
-    pitches = [audio_features["pitch"][i] for i in indices if audio_features["pitch"][i] > 0]
+    energies = [seg["energy"] for seg in matching_segments]
+    pitches = [seg["pitch"] for seg in matching_segments if seg["pitch"] > 0]
 
     return {
         "avg_energy": float(sum(energies) / len(energies)) if energies else 0.0,
@@ -657,14 +526,14 @@ def _detect_energy_peaks(
     Detect energy peaks (high-energy moments) in audio.
 
     Args:
-        audio_features: Audio features dict
+        audio_features: List of audio segments from analyze_audio_features
         threshold_percentile: Energy percentile to consider as peak
 
     Returns:
         List of energy peak events
     """
-    energies = np.array(audio_features["energy"])
-    times = audio_features["times"]
+    segments = audio_features
+    energies = np.array([seg["energy"] for seg in segments])
 
     # Calculate threshold
     threshold = np.percentile(energies, threshold_percentile)
@@ -672,17 +541,18 @@ def _detect_energy_peaks(
     # Find peaks (local maxima above threshold)
     peaks = []
 
-    for i in range(ENERGY_PEAK_WINDOW_SIZE, len(energies) - ENERGY_PEAK_WINDOW_SIZE):
+    for i in range(ENERGY_PEAK_WINDOW_SIZE, len(segments) - ENERGY_PEAK_WINDOW_SIZE):
         if energies[i] > threshold:
             # Check if it's a local maximum
             if energies[i] == max(
                 energies[i - ENERGY_PEAK_WINDOW_SIZE : i + ENERGY_PEAK_WINDOW_SIZE]
             ):
+                seg = segments[i]
                 # Avoid duplicate peaks too close together
-                if not peaks or (times[i] - peaks[-1]["time"]) > ENERGY_PEAK_MIN_SPACING:
+                if not peaks or (seg["start"] - peaks[-1]["time"]) > ENERGY_PEAK_MIN_SPACING:
                     peaks.append(
                         {
-                            "time": times[i],
+                            "time": seg["start"],
                             "energy": float(energies[i]),
                         }
                     )
@@ -700,16 +570,16 @@ def _detect_music_sections(
     Uses spectral brightness and harmonic content to identify music.
 
     Args:
-        audio_features: Audio features dict
+        audio_features: List of audio segments from analyze_audio_features
         energy_threshold: Minimum energy to consider
 
     Returns:
         List of music section events
     """
-    times = audio_features["times"]
-    energies = np.array(audio_features["energy"])
-    brightness = np.array(audio_features["spectral_brightness"])
-    zcr = np.array(audio_features["zero_crossing_rate"])
+    segments = audio_features
+    energies = np.array([seg["energy"] for seg in segments])
+    brightness = np.array([seg["spectral_brightness"] for seg in segments])
+    zcr = np.array([seg["zero_crossing_rate"] for seg in segments])
 
     # Music typically has: high brightness, low ZCR (harmonic), sustained energy
     harmonic_ratio = 1.0 - zcr
@@ -722,20 +592,22 @@ def _detect_music_sections(
     in_section = False
     section_start = 0.0
 
-    for time, score in zip(times, music_score):
+    for seg, score in zip(segments, music_score):
         if score > MUSIC_SCORE_THRESHOLD and not in_section:
-            section_start = time
+            section_start = seg["start"]
             in_section = True
         elif score <= MUSIC_SCORE_THRESHOLD and in_section:
-            if time - section_start > MUSIC_MIN_DURATION:
+            if seg["start"] - section_start > MUSIC_MIN_DURATION:
                 # Calculate average intensity for this section
-                section_indices = [j for j, t in enumerate(times) if section_start <= t <= time]
-                avg_intensity = float(np.mean([energies[j] for j in section_indices]))
+                section_segments = [
+                    s for s in segments if section_start <= s["start"] <= seg["start"]
+                ]
+                avg_intensity = float(np.mean([s["energy"] for s in section_segments]))
 
                 sections.append(
                     {
                         "start": section_start,
-                        "end": time,
+                        "end": seg["start"],
                         "intensity": avg_intensity,
                     }
                 )
@@ -876,7 +748,7 @@ def calculate_emphasis_score(
 
     Args:
         segment: Timeline segment with start_ms, end_ms
-        audio_features: Audio features dict from analyze_audio_features
+        audio_features: List of audio segments from analyze_audio_features
         window_seconds: Window size for rolling baseline (default: 5.0s)
 
     Returns:
@@ -893,8 +765,7 @@ def calculate_emphasis_score(
     local_energy = segment_features["avg_energy"]
 
     # Calculate rolling baseline and std using window around segment
-    times = np.array(audio_features["times"])
-    energies = np.array(audio_features["energy"])
+    segments = audio_features
 
     # Find center of segment
     segment_center = (start_s + end_s) / 2.0
@@ -904,13 +775,16 @@ def calculate_emphasis_score(
     window_end = segment_center + window_seconds / 2.0
 
     # Get energies in window
-    window_mask = (times >= window_start) & (times <= window_end)
-    window_energies = energies[window_mask]
+    window_segments = [
+        seg for seg in segments if not (seg["end"] <= window_start or seg["start"] >= window_end)
+    ]
+    window_energies = np.array([seg["energy"] for seg in window_segments])
+    all_energies = np.array([seg["energy"] for seg in segments])
 
     if len(window_energies) < 2:
         # Not enough data for baseline, use global baseline
-        rolling_baseline = float(np.mean(energies))
-        rolling_std = float(np.std(energies))
+        rolling_baseline = float(np.mean(all_energies))
+        rolling_std = float(np.std(all_energies))
     else:
         rolling_baseline = float(np.mean(window_energies))
         rolling_std = float(np.std(window_energies))
@@ -928,7 +802,7 @@ def calculate_emphasis_score(
 
 def calculate_bgm_penalty(
     segment: dict,
-    audio_features: dict,
+    audio_features: list[dict[str, Any]],
 ) -> float:
     """
     Calculate background music penalty based on energy variance.
@@ -953,13 +827,15 @@ def calculate_bgm_penalty(
     end_s = segment.get("end_ms", 0) / 1000.0
 
     # Get energies in segment
-    times = audio_features["times"]
-    indices = [i for i, t in enumerate(times) if start_s <= t <= end_s]
+    segments = audio_features
+    segment_segments = [
+        seg for seg in segments if not (seg["end"] <= start_s or seg["start"] >= end_s)
+    ]
 
-    if not indices:
+    if not segment_segments:
         return 1.0  # No data, assume no penalty
 
-    energies = [audio_features["energy"][i] for i in indices]
+    energies = [seg["energy"] for seg in segment_segments]
 
     if len(energies) < 2:
         return 1.0  # Not enough data for variance
@@ -1000,7 +876,7 @@ def calculate_audio_score(
 
     Args:
         segment: Timeline segment with start_ms, end_ms, text
-        audio_features: Audio features dict from analyze_audio_features
+        audio_features: List of audio segments from analyze_audio_features
         claim_keywords: Keywords for strong claims/reveals
         emphasis_keywords: Keywords for emphasis/contrast
         filler_keywords: Keywords for filler content

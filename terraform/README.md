@@ -87,7 +87,72 @@ The `terraform.tfvars` file contains the current production configuration that m
 | **Memory** | `4Gi` | Container memory limit |
 | **Bucket** | `clickmoment-prod-assets` | GCS bucket name |
 
+### 🔑 Required API Keys (via Secret Manager)
+
+The application requires two API keys stored in **Google Cloud Secret Manager**:
+
+1. **OPENAI_API_KEY** - For GPT-4o Transcribe Diarize (audio transcription and analysis)
+2. **GEMINI_API_KEY** - For Gemini 2.5 Flash (AI-powered thumbnail selection)
+
+#### Create Secrets in Secret Manager
+
+You can create/update secrets via the [Google Cloud Console](https://console.cloud.google.com/security/secret-manager) or using `gcloud`:
+
+```bash
+# Create OPENAI_API_KEY secret (if not exists)
+echo -n "sk-proj-your-openai-key" | gcloud secrets create OPENAI_API_KEY \
+  --data-file=- \
+  --replication-policy="automatic"
+
+# Or update existing secret with new version
+echo -n "sk-proj-your-openai-key" | gcloud secrets versions add OPENAI_API_KEY \
+  --data-file=-
+
+# Create GEMINI_API_KEY secret (if not exists)
+echo -n "AIza-your-gemini-key" | gcloud secrets create GEMINI_API_KEY \
+  --data-file=- \
+  --replication-policy="automatic"
+
+# Or update existing secret with new version
+echo -n "AIza-your-gemini-key" | gcloud secrets versions add GEMINI_API_KEY \
+  --data-file=-
+```
+
+#### Verify Secrets
+
+List all secrets:
+```bash
+gcloud secrets list
+```
+
+View secret details (not the actual value):
+```bash
+gcloud secrets describe OPENAI_API_KEY
+gcloud secrets describe GEMINI_API_KEY
+```
+
+The Terraform configuration automatically:
+- Grants the Cloud Run service account `secretmanager.secretAccessor` role
+- Mounts the secrets as environment variables in the container
+- Uses the `latest` version of each secret
+
 ## 🛠️ Usage
+
+### Set API Keys in Secret Manager (One-Time Setup)
+
+Before deploying for the first time, create the required secrets:
+
+```bash
+# Create GEMINI_API_KEY if it doesn't exist
+echo -n "AIza-your-gemini-key" | gcloud secrets create GEMINI_API_KEY \
+  --data-file=- \
+  --replication-policy="automatic"
+
+# OPENAI_API_KEY should already exist (visible in your screenshot)
+# If you need to update it:
+echo -n "sk-proj-your-openai-key" | gcloud secrets versions add OPENAI_API_KEY \
+  --data-file=-
+```
 
 ### Initialize Terraform
 
@@ -122,8 +187,9 @@ terraform apply
 Terraform will:
 1. Show you a plan
 2. Ask for confirmation (type `yes`)
-3. Create/update resources
-4. Save state to `terraform.tfstate`
+3. Create/update resources (including Secret Manager IAM permissions)
+4. Mount secrets as environment variables in Cloud Run
+5. Save state to `terraform.tfstate`
 
 ### View Current State
 

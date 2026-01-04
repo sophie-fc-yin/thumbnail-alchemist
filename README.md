@@ -347,25 +347,25 @@ Input Signals (all normalized to [0, 1]):
 
 ```python
 from app.face_analysis import FaceExpressionAnalyzer
-from app.pace_analysis import calculate_pace_score, pace_to_sampling_interval
+from app.analysis.moment_importance import calculate_moment_importance, importance_to_sampling_interval
 
 # Analyze a frame
 analyzer = FaceExpressionAnalyzer()
 analysis = analyzer.analyze_frame("frame.jpg")
 
-# Calculate pace from multiple signals
-pace = calculate_pace_score(
+# Calculate moment importance from multiple signals
+importance = calculate_moment_importance(
     expression_delta=0.8,      # High expression change
     landmark_motion=0.6,       # Moderate head movement
     audio_energy_delta=0.9,    # High audio energy spike
     speech_emotion_delta=0.7,  # Strong vocal emphasis
     audio_score=0.85,          # High audio score (speech + importance + emphasis)
 )
-# pace ≈ 0.82 (high pace!)
+# importance ≈ 0.82 (high importance moment!)
 
 # Convert to sampling interval
-interval = pace_to_sampling_interval(pace)
-# interval ≈ 0.12s (dense sampling for this exciting moment)
+interval = importance_to_sampling_interval(importance)
+# interval ≈ 0.12s (dense sampling around this important moment)
 ```
 
 ### Installation

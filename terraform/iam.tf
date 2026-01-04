@@ -29,13 +29,28 @@ resource "google_service_account_iam_member" "compute_token_creator" {
   member             = "serviceAccount:${var.compute_service_account}"
 }
 
+# Grant compute service account access to Secret Manager secrets
+resource "google_project_iam_member" "compute_secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${var.compute_service_account}"
+}
+
+# Grant Cloud Build service account access to Secret Manager for builds
+resource "google_project_iam_member" "cloudbuild_secret_accessor" {
+  project = var.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${var.project_number}@cloudbuild.gserviceaccount.com"
+}
+
 # Output IAM configuration summary
 output "iam_summary" {
   description = "Summary of IAM permissions configured"
   value = {
-    cloudbuild_role   = "roles/run.admin"
-    compute_role      = "roles/storage.admin"
-    compute_sa        = var.compute_service_account
-    cloudbuild_sa     = "${var.project_number}@cloudbuild.gserviceaccount.com"
+    cloudbuild_role      = "roles/run.admin"
+    compute_role         = "roles/storage.admin"
+    compute_sa           = var.compute_service_account
+    cloudbuild_sa        = "${var.project_number}@cloudbuild.gserviceaccount.com"
+    secret_access_grants = ["compute", "cloudbuild"]
   }
 }

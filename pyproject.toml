@@ -18,8 +18,10 @@ dependencies = [
     "python-multipart>=0.0.6",
     "onnxruntime>=1.16.0",
     "huggingface-hub>=0.19.0",
+    "transformers>=4.35.0",  # For emotion recognition model (audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim)
     "torch>=2.0.0",
     "torchaudio>=2.0.0",
+    "torchcodec>=0.1.0",  # For speech detection with Silero VAD
     "soundfile>=0.12.0",
     "pillow>=11.3.0",
 ]

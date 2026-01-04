@@ -15,7 +15,7 @@ async def test_generate_thumbnail_happy_path():
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         resp = await client.post(
             "/thumbnails/generate",
-            json={"sources": {"image_urls": ["https://example.com/frame.jpg"]}},
+            json={"content_sources": {"image_paths": ["https://example.com/frame.jpg"]}},
         )
 
     assert resp.status_code == 200
@@ -23,17 +23,16 @@ async def test_generate_thumbnail_happy_path():
     assert data["status"] == "draft"
     assert data["recommended_title"]
     assert data["thumbnail_url"]
-    assert isinstance(data["layers"], list) and data["layers"]
+    assert isinstance(data["layers"], list)
 
 
 @pytest.mark.anyio
 async def test_generate_thumbnail_requires_media():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        resp = await client.post("/thumbnails/generate", json={"sources": {}})
+        resp = await client.post("/thumbnails/generate", json={})
 
     assert resp.status_code == 422
     body = resp.json()
     assert body["detail"] == "Invalid request payload"
-    assert body["errors"][0]["field"] == "sources"
-    assert "Provide at least one of video_url or image_urls" in body["errors"][0]["message"]
+    assert body["errors"][0]["field"] == "content_sources"

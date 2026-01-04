@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from google.cloud import storage
+from google.cloud import storage  # type: ignore
 
 
 def build_comprehensive_analysis_json(
@@ -22,8 +22,8 @@ def build_comprehensive_analysis_json(
     visual_analysis: list[dict[str, Any]],
     merged_timeline: list[dict[str, Any]],
     extracted_frames: list[dict[str, Any]],
-    pace_segments: list[dict[str, Any]],
-    pace_statistics: dict[str, Any],
+    importance_segments: list[dict[str, Any]],
+    importance_statistics: dict[str, Any],
     processing_stats: dict[str, Any],
     audio_features: dict[str, Any] | None = None,
     transcript_data: dict[str, Any] | None = None,
@@ -39,8 +39,8 @@ def build_comprehensive_analysis_json(
         visual_analysis: Face analysis results for each sample frame
         merged_timeline: Combined timeline from all streams
         extracted_frames: Final extracted frames with metadata
-        pace_segments: Pace segmentation results
-        pace_statistics: Pace statistics summary
+        importance_segments: Moment importance segmentation results
+        importance_statistics: Moment importance statistics summary
         processing_stats: Processing time statistics
         audio_features: Raw audio features (optional)
         transcript_data: Transcription data (optional)
@@ -74,19 +74,13 @@ def build_comprehensive_analysis_json(
         # Stream B: Audio Saliency
         "stream_b": {
             "enabled": stream_b_results is not None,
-            "energy_peaks": stream_b_results.get("energy_peaks", []) if stream_b_results else [],
-            "spectral_changes": (
-                stream_b_results.get("spectral_changes", []) if stream_b_results else []
+            "saliency_segments": (
+                stream_b_results if stream_b_results and isinstance(stream_b_results, list) else []
             ),
-            "silence_to_impact": (
-                stream_b_results.get("silence_to_impact", []) if stream_b_results else []
-            ),
-            "non_speech_sounds": (
-                stream_b_results.get("non_speech_sounds", []) if stream_b_results else []
-            ),
-            "timeline": stream_b_results.get("saliency_timeline", []) if stream_b_results else [],
             "total_moments": (
-                len(stream_b_results.get("saliency_timeline", [])) if stream_b_results else 0
+                len(stream_b_results)
+                if stream_b_results and isinstance(stream_b_results, list)
+                else 0
             ),
         },
         # Visual Analysis
@@ -99,10 +93,10 @@ def build_comprehensive_analysis_json(
         "merged_timeline": merged_timeline,
         # Final Extracted Frames
         "extracted_frames": extracted_frames,
-        # Pace Analysis (current method)
-        "pace_analysis": {
-            "segments": pace_segments,
-            "statistics": pace_statistics,
+        # Moment Importance Analysis
+        "importance_analysis": {
+            "segments": importance_segments,
+            "statistics": importance_statistics,
         },
         # Processing Statistics
         "processing_stats": processing_stats,
@@ -156,12 +150,13 @@ async def save_analysis_json_to_gcs(
         blob.patch()
 
         gcs_url = f"gs://{bucket_name}/{blob_path}"
-        print(f"[Analysis Output] Saved comprehensive analysis to {gcs_url}")
+        print(f"[Analysis Output] ✅ Saved comprehensive analysis to {gcs_url}")
 
         return gcs_url
 
     except Exception as e:
-        print(f"[Analysis Output] Failed to save analysis JSON: {e}")
+        print(f"[Analysis Output] ❌ Failed to save analysis JSON to GCS: {e}")
+        print(f"[Analysis Output] Check permissions: gsutil iam get gs://{bucket_name}")
         # Fallback: save locally
         try:
             local_path = Path(f"analysis_{project_id}.json")
