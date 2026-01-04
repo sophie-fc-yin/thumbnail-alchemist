@@ -650,8 +650,11 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     2. Thumbnail selection agent → AI picks best frame with detailed reasoning
     3. Return selected frame + composition suggestions
 
-    Cost: ~$0.0023 per generation (Gemini 2.5 Flash)
+    Cost: ~$0.0023 per generation (Gemini 2.5 Flash) + Cloud Run compute costs
     """
+    # Track start time for runtime and cost calculation
+    start_time = time.time()
+
     # Use provided project_id or generate new one
     project_id = payload.project_id or str(uuid4())
 
@@ -667,6 +670,8 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         # No duration validation needed for image-only mode
         image_paths = payload.content_sources.image_paths
         if image_paths:
+            runtime_seconds = time.time() - start_time
+            cloud_run_cost = calculate_cloud_run_cost(runtime_seconds)
             first = image_paths[0]
             return ThumbnailResponse(
                 project_id=project_id,
@@ -680,7 +685,11 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
                 phase1=None,
                 total_frames_extracted=len(image_paths),
                 analysis_json_url=None,
-                cost_usd=None,
+                gemini_cost_usd=None,
+                gpt4_cost_usd=None,
+                cloud_run_cost_usd=cloud_run_cost,
+                total_cost_usd=cloud_run_cost,
+                cost_usd=None,  # Legacy field
                 gemini_model=None,
                 summary=(
                     "Image-only request received. "
@@ -892,6 +901,21 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         logger.warning("GEMINI_API_KEY not set: %s", e)
         logger.warning("Returning mock response without AI selection")
 
+        # Calculate runtime and costs for this path
+        runtime_seconds = time.time() - start_time
+        cloud_run_cost = calculate_cloud_run_cost(runtime_seconds)
+
+        # Try to get GPT-4 cost if video was processed
+        gpt4_cost = 0.0
+        try:
+            video_duration = await get_video_duration(
+                video_path, video_url=video_url_for_processing
+            )
+            if video_duration > 0:
+                gpt4_cost = calculate_gpt4_transcription_cost(video_duration)
+        except Exception:
+            pass  # GPT-4 cost unavailable, use 0
+
         # Cleanup local frames before returning
         cleanup_local_frames(project_id)
 
@@ -909,7 +933,11 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
             phase1=None,
             total_frames_extracted=len(candidate_frame_urls),
             analysis_json_url=adaptive_result.get("analysis_json_url"),
-            cost_usd=None,
+            gemini_cost_usd=None,
+            gpt4_cost_usd=gpt4_cost if gpt4_cost > 0 else None,
+            cloud_run_cost_usd=cloud_run_cost,
+            total_cost_usd=gpt4_cost + cloud_run_cost,
+            cost_usd=None,  # Legacy field
             gemini_model=None,
             summary=(
                 f"Extracted {len(candidate_frame_urls)} frames using adaptive sampling. "
@@ -1121,6 +1149,43 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
     # ========================================================================
     cleanup_local_frames(project_id)
 
+    # Calculate runtime and costs
+    runtime_seconds = time.time() - start_time
+
+    # Get Gemini cost (from selection result)
+    gemini_cost = selection_result.get("cost_usd")
+
+    # Get GPT-4 transcription cost (from video duration)
+    # Note: GPT-4o-transcribe-diarize processes speech audio extracted from the video.
+    # We use video duration as a proxy since transcription_result is not directly available
+    # in adaptive_result. This is a reasonable approximation for videos with speech.
+    gpt4_cost = 0.0
+    # Video duration was already fetched during validation, but we'll get it again if needed
+    # In practice, we could cache it, but for accuracy we fetch it here
+    try:
+        video_duration = await get_video_duration(video_path, video_url=video_url_for_processing)
+        if video_duration > 0:
+            gpt4_cost = calculate_gpt4_transcription_cost(video_duration)
+    except Exception as e:
+        logger.warning("Could not calculate GPT-4 cost (video duration unavailable): %s", e)
+
+    # Calculate Cloud Run cost from actual runtime
+    cloud_run_cost = calculate_cloud_run_cost(runtime_seconds)
+
+    # Calculate total cost
+    total_cost = (gemini_cost or 0.0) + gpt4_cost + cloud_run_cost
+
+    logger.info("─" * 70)
+    logger.info("COST SUMMARY")
+    logger.info("─" * 70)
+    logger.info("Runtime: %.2f seconds", runtime_seconds)
+    if gemini_cost is not None:
+        logger.info("Gemini API cost: $%.6f", gemini_cost)
+    if gpt4_cost > 0:
+        logger.info("GPT-4o transcription cost: $%.6f", gpt4_cost)
+    logger.info("Cloud Run compute cost: $%.6f", cloud_run_cost)
+    logger.info("Total cost: $%.6f", total_cost)
+
     # Use safe option as default thumbnail_url
     return ThumbnailResponse(
         project_id=project_id,
@@ -1139,10 +1204,80 @@ async def generate_thumbnail(payload: ThumbnailRequest) -> ThumbnailResponse:
         phase1=phase1,
         total_frames_extracted=len(extracted_frames),
         analysis_json_url=adaptive_result.get("analysis_json_url"),
-        cost_usd=selection_result.get("cost_usd"),
+        gemini_cost_usd=gemini_cost,
+        gpt4_cost_usd=gpt4_cost if gpt4_cost > 0 else None,
+        cloud_run_cost_usd=cloud_run_cost,
+        total_cost_usd=total_cost,
+        cost_usd=gemini_cost,  # Legacy field for backwards compatibility
         gemini_model=selection_result.get("gemini_model"),
         summary=summary_text,
     )
+
+
+# ============================================================================
+# Helper Functions for Cost Estimation
+# ============================================================================
+
+
+def calculate_cloud_run_cost(
+    runtime_seconds: float, cpu_count: int = 2, memory_gib: float = 4.0
+) -> float:
+    """
+    Calculate Cloud Run compute cost based on actual runtime and resource allocation.
+
+    Cloud Run pricing (as of 2025):
+    - vCPU: $0.000024 per vCPU-second
+    - Memory: $0.0000025 per GiB-second
+
+    Note: This calculation does not account for monthly free tier allowances
+    (180,000 vCPU-seconds and 360,000 GiB-seconds per month), which would
+    reduce costs at scale. This provides per-request cost calculation.
+
+    Args:
+        runtime_seconds: Actual runtime in seconds
+        cpu_count: Number of vCPUs allocated (default: 2 from terraform config)
+        memory_gib: Memory allocated in GiB (default: 4.0 from terraform config)
+
+    Returns:
+        Cost in USD
+    """
+    # Cloud Run pricing constants
+    CPU_COST_PER_VCPU_SECOND = 0.000024
+    MEMORY_COST_PER_GIB_SECOND = 0.0000025
+
+    # Calculate resource-seconds
+    vcpu_seconds = runtime_seconds * cpu_count
+    gib_seconds = runtime_seconds * memory_gib
+
+    # Calculate costs
+    cpu_cost = vcpu_seconds * CPU_COST_PER_VCPU_SECOND
+    memory_cost = gib_seconds * MEMORY_COST_PER_GIB_SECOND
+
+    return cpu_cost + memory_cost
+
+
+def calculate_gpt4_transcription_cost(audio_duration_seconds: float) -> float:
+    """
+    Calculate GPT-4o-transcribe-diarize cost based on actual audio duration.
+
+    GPT-4o-transcribe-diarize pricing (as of 2025):
+    - $0.06 per minute of audio processed
+
+    Args:
+        audio_duration_seconds: Audio duration in seconds
+
+    Returns:
+        Cost in USD
+    """
+    if audio_duration_seconds <= 0:
+        return 0.0
+
+    # GPT-4o-transcribe-diarize pricing: $0.06 per minute
+    GPT4_COST_PER_MINUTE = 0.06
+
+    # Convert seconds to minutes and calculate cost
+    audio_minutes = audio_duration_seconds / 60.0
+    return audio_minutes * GPT4_COST_PER_MINUTE
 
 
 # ============================================================================

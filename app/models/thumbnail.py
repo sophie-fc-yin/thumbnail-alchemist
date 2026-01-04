@@ -296,7 +296,20 @@ class ThumbnailResponse(BaseModel):
     analysis_json_url: Optional[str] = Field(
         None, description="GCS URL to comprehensive analysis JSON"
     )
-    cost_usd: Optional[float] = Field(None, description="AI selection cost in USD")
+    gemini_cost_usd: Optional[float] = Field(
+        None, description="Gemini API cost in USD (thumbnail selection)"
+    )
+    gpt4_cost_usd: Optional[float] = Field(
+        None, description="GPT-4o transcription cost in USD (audio transcription)"
+    )
+    cloud_run_cost_usd: Optional[float] = Field(
+        None, description="Cloud Run compute cost in USD (vCPU + memory)"
+    )
+    total_cost_usd: Optional[float] = Field(
+        None, description="Total cost in USD (Gemini + GPT-4 + Cloud Run)"
+    )
+    # Legacy field for backwards compatibility
+    cost_usd: Optional[float] = Field(None, description="Deprecated: Use gemini_cost_usd instead")
     gemini_model: Optional[str] = Field(None, description="Gemini model used for selection")
 
     # Summary
